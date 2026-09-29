@@ -1,7 +1,7 @@
-use std::{error::Error, io};
+use std::{error::Error, io, process::Command};
 
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -14,7 +14,7 @@ use ratatui::{
 };
 
 // Track where the user's cursor currently is
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub enum ActivePane {
     Type,       // e.g., feat, fix, chore
     Scope,      // e.g., ui, backend
@@ -76,6 +76,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Initialize state
     let mut app = App::default();
 
+    let output = Command::new("jj")
+        .args(["diff", "-r", "@", "--git"])
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            app.diff_content = String::from_utf8_lossy(&output.stdout).into_owned();
+        }
+        Ok(output) => {
+            // If jj throws an error (e.g., not in a repo), show the error in the diff pane
+            app.diff_content = String::from_utf8_lossy(&output.stderr).into_owned();
+        }
+        Err(e) => {
+            app.diff_content = format!("Failed to run jj command: {e}");
+        }
+    }
+
     // Run application loop
     let res = run_app(&mut terminal, &mut app);
 
@@ -101,6 +118,45 @@ fn run_app(
 
         // Handle events (blocking wait for next keystroke)
         if let Event::Key(key) = event::read()? {
+            // Submit Block
+            if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('s') {
+                let mut commit_msg = String::new();
+
+                // Format the header (handle empty scope gracefully)
+                if app.scope.trim().is_empty() {
+                    commit_msg.push_str(&format!(
+                        "{}: {}",
+                        app.commit_type.trim(),
+                        app.subject.trim()
+                    ));
+                } else {
+                    commit_msg.push_str(&format!(
+                        "{}({}): {}",
+                        app.commit_type.trim(),
+                        app.scope.trim(),
+                        app.subject.trim()
+                    ));
+                }
+
+                // Append Problem if it exists
+                if !app.problem.trim().is_empty() {
+                    commit_msg.push_str(&format!("\n\nProblem:\n{}", app.problem.trim()));
+                }
+
+                // Append Solution if it exists
+                if !app.solution.trim().is_empty() {
+                    commit_msg.push_str(&format!("\n\nSolution:\n{}", app.solution.trim()));
+                }
+
+                // Execute jj describe
+                let _ = Command::new("jj")
+                    .args(["describe", "-r", "@", "-m", &commit_msg])
+                    .status();
+
+                // Exit the TUI
+                app.should_quit = true;
+                continue;
+            }
             match app.input_mode {
                 InputMode::Normal => match key.code {
                     KeyCode::Char('q') => app.should_quit = true,
@@ -112,22 +168,32 @@ fn run_app(
                     KeyCode::Char('l') => app.active_pane = ActivePane::Type, // Jump back to forms
 
                     // Up/Down navigation through the right-side forms
-                    KeyCode::Char('j') => {
-                        app.active_pane = match app.active_pane {
-                            ActivePane::Type => ActivePane::Scope,
-                            ActivePane::Scope => ActivePane::Subject,
-                            ActivePane::Subject => ActivePane::Problem,
-                            ActivePane::Problem => ActivePane::Solution,
-                            _ => app.active_pane.clone(), // Do nothing if in Solution or DiffViewer
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if matches!(app.active_pane, ActivePane::DiffViewer) {
+                            // Scroll down
+                            app.diff_scroll_position = app.diff_scroll_position.saturating_add(1);
+                        } else {
+                            app.active_pane = match app.active_pane {
+                                ActivePane::Type => ActivePane::Scope,
+                                ActivePane::Scope => ActivePane::Subject,
+                                ActivePane::Subject => ActivePane::Problem,
+                                ActivePane::Problem => ActivePane::Solution,
+                                _ => app.active_pane, // Do nothing if in Solution or DiffViewer
+                            }
                         }
                     }
-                    KeyCode::Char('k') => {
-                        app.active_pane = match app.active_pane {
-                            ActivePane::Scope => ActivePane::Type,
-                            ActivePane::Subject => ActivePane::Scope,
-                            ActivePane::Problem => ActivePane::Subject,
-                            ActivePane::Solution => ActivePane::Problem,
-                            _ => app.active_pane.clone(),
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if matches!(app.active_pane, ActivePane::DiffViewer) {
+                            // Scroll up
+                            app.diff_scroll_position = app.diff_scroll_position.saturating_sub(1);
+                        } else {
+                            app.active_pane = match app.active_pane {
+                                ActivePane::Scope => ActivePane::Type,
+                                ActivePane::Subject => ActivePane::Scope,
+                                ActivePane::Problem => ActivePane::Subject,
+                                ActivePane::Solution => ActivePane::Problem,
+                                _ => app.active_pane,
+                            }
                         }
                     }
                     _ => {}
@@ -187,12 +253,15 @@ fn ui(f: &mut Frame, app: &App) {
     } else {
         Color::DarkGray
     };
-    let diff_block = Paragraph::new(app.diff_content.as_str()).block(
-        Block::default()
-            .title(" Diff (@) ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(diff_color)),
-    );
+    let diff_block = Paragraph::new(app.diff_content.as_str())
+        .block(
+            Block::default()
+                .title(" Diff (@) ")
+                .borders(Borders::ALL)
+                .style(Style::default().fg(diff_color)),
+        )
+        .scroll((app.diff_scroll_position, 0));
+
     f.render_widget(diff_block, main_chunks[0]);
 
     // 3. Split the Right Side vertically for the input forms
