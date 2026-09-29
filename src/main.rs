@@ -8,6 +8,7 @@ use crossterm::{
 use ratatui::{Frame, Terminal, backend::CrosstermBackend};
 
 // Track where the user's cursor currently is
+#[derive(Clone)]
 pub enum ActivePane {
     Type,       // e.g., feat, fix, chore
     Scope,      // e.g., ui, backend
@@ -97,7 +98,32 @@ fn run_app(
             match app.input_mode {
                 InputMode::Normal => match key.code {
                     KeyCode::Char('q') => app.should_quit = true,
-                    // TODO: Add H/J/K/L navigation here
+
+                    KeyCode::Char('i') => app.input_mode = InputMode::Insert,
+
+                    // Left/Right navigation
+                    KeyCode::Char('h') => app.active_pane = ActivePane::DiffViewer,
+                    KeyCode::Char('l') => app.active_pane = ActivePane::Type, // Jump back to forms
+
+                    // Up/Down navigation through the right-side forms
+                    KeyCode::Char('j') => {
+                        app.active_pane = match app.active_pane {
+                            ActivePane::Type => ActivePane::Scope,
+                            ActivePane::Scope => ActivePane::Subject,
+                            ActivePane::Subject => ActivePane::Problem,
+                            ActivePane::Problem => ActivePane::Solution,
+                            _ => app.active_pane.clone(), // Do nothing if in Solution or DiffViewer
+                        }
+                    }
+                    KeyCode::Char('k') => {
+                        app.active_pane = match app.active_pane {
+                            ActivePane::Scope => ActivePane::Type,
+                            ActivePane::Subject => ActivePane::Scope,
+                            ActivePane::Problem => ActivePane::Subject,
+                            ActivePane::Solution => ActivePane::Problem,
+                            _ => app.active_pane.clone(),
+                        }
+                    }
                     _ => {}
                 },
                 InputMode::Insert => match key.code {
