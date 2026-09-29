@@ -132,11 +132,41 @@ fn run_app(
                     }
                     _ => {}
                 },
-                InputMode::Insert => match key.code {
-                    KeyCode::Esc => app.input_mode = InputMode::Normal,
-                    // TODO: Route typing to the active text buffer
-                    _ => {}
-                },
+                InputMode::Insert => {
+                    // 1. Get a mutable reference to the currently active text buffer
+                    let active_buffer = match app.active_pane {
+                        ActivePane::Type => Some(&mut app.commit_type),
+                        ActivePane::Scope => Some(&mut app.scope),
+                        ActivePane::Subject => Some(&mut app.subject),
+                        ActivePane::Problem => Some(&mut app.problem),
+                        ActivePane::Solution => Some(&mut app.solution),
+                        ActivePane::DiffViewer => None, // Cannot type in the diff viewer
+                    };
+
+                    // 2. Handle the keystrokes
+                    match key.code {
+                        KeyCode::Esc => app.input_mode = InputMode::Normal,
+                        KeyCode::Char(c) => {
+                            if let Some(buf) = active_buffer {
+                                buf.push(c);
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let Some(buf) = active_buffer {
+                                buf.pop(); // Removes the last character
+                            }
+                        }
+                        KeyCode::Enter => {
+                            // Only allow multi-line text in the Problem and Solution boxes
+                            if matches!(app.active_pane, ActivePane::Problem | ActivePane::Solution)
+                                && let Some(buf) = active_buffer
+                            {
+                                buf.push('\n');
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
     }
