@@ -32,4 +32,21 @@ pub struct App {
     pub should_quit: bool,
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            diff_content: String::new(),
+            commit_type: String::new(),
+            scope: String::new(),
+            subject: String::new(),
+            problem: String::new(),
+            solution: String::new(),
+            active_pane: ActivePane::Type, // Start cursor here
+            input_mode: InputMode::Normal, // Start in Normal mode
+            diff_scroll_position: 0,
+            should_quit: false,
+        }
+    }
+}
+
 fn main() {}
