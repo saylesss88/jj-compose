@@ -1,3 +1,12 @@
+use std::{error::Error, io};
+
+use crossterm::{
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use ratatui::{Frame, Terminal, backend::CrosstermBackend};
+
 // Track where the user's cursor currently is
 pub enum ActivePane {
     Type,       // e.g., feat, fix, chore
@@ -49,4 +58,60 @@ impl Default for App {
     }
 }
 
-fn main() {}
+fn main() -> Result<(), Box<dyn Error>> {
+    // Setup terminal
+    enable_raw_mode()?;
+    let mut stderr = io::stderr();
+    execute!(stderr, EnterAlternateScreen)?; // Swaps to a clean screen
+    let backend = CrosstermBackend::new(stderr);
+    let mut terminal = Terminal::new(backend)?;
+
+    // Initialize state
+    let mut app = App::default();
+
+    // Run application loop
+    let res = run_app(&mut terminal, &mut app);
+
+    // Teardown terminal
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    if let Err(err) = res {
+        println!("{err:?}");
+    }
+
+    Ok(())
+}
+
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+    app: &mut App,
+) -> Result<(), Box<dyn Error>> {
+    while !app.should_quit {
+        // Draw the UI
+        terminal.draw(|f| ui(f, app))?;
+
+        // Handle events (blocking wait for next keystroke)
+        if let Event::Key(key) = event::read()? {
+            match app.input_mode {
+                InputMode::Normal => match key.code {
+                    KeyCode::Char('q') => app.should_quit = true,
+                    // TODO: Add H/J/K/L navigation here
+                    _ => {}
+                },
+                InputMode::Insert => match key.code {
+                    KeyCode::Esc => app.input_mode = InputMode::Normal,
+                    // TODO: Route typing to the active text buffer
+                    _ => {}
+                },
+            }
+        }
+    }
+    Ok(())
+}
+
+// The Rendering Function
+fn ui(f: &mut Frame, app: &App) {
+    // TODO: Split the frame and draw widgets based on app.active_pane
+}
