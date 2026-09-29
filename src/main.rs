@@ -5,7 +5,13 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Frame, Terminal, backend::CrosstermBackend};
+use ratatui::{
+    Frame, Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Style},
+    widgets::{Block, Borders, Paragraph},
+};
 
 // Track where the user's cursor currently is
 #[derive(Clone)]
@@ -139,5 +145,86 @@ fn run_app(
 
 // The Rendering Function
 fn ui(f: &mut Frame, app: &App) {
-    // TODO: Split the frame and draw widgets based on app.active_pane
+    // 1. Split the entire screen in half horizontally
+    let main_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(f.area());
+
+    // 2. Draw the Left Side (Diff Viewer)
+    let diff_color = if matches!(app.active_pane, ActivePane::DiffViewer) {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
+    let diff_block = Paragraph::new(app.diff_content.as_str()).block(
+        Block::default()
+            .title(" Diff (@) ")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(diff_color)),
+    );
+    f.render_widget(diff_block, main_chunks[0]);
+
+    // 3. Split the Right Side vertically for the input forms
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Type
+            Constraint::Length(3), // Scope
+            Constraint::Length(3), // Subject
+            Constraint::Min(5),    // Problem (expands to fill space)
+            Constraint::Min(5),    // Solution (expands to fill space)
+        ])
+        .split(main_chunks[1]);
+
+    // Helper macro/function to draw input boxes with the correct highlight color
+    let get_color = |target_pane: &ActivePane| -> Color {
+        // If the app's active pane matches this box, highlight it Green
+        if std::mem::discriminant(&app.active_pane) == std::mem::discriminant(target_pane) {
+            Color::Green
+        } else {
+            Color::DarkGray
+        }
+    };
+
+    // 4. Draw each input box on the right side
+    let p_type = Paragraph::new(app.commit_type.as_str()).block(
+        Block::default()
+            .title(" Type ")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(get_color(&ActivePane::Type))),
+    );
+    f.render_widget(p_type, right_chunks[0]);
+
+    let p_scope = Paragraph::new(app.scope.as_str()).block(
+        Block::default()
+            .title(" Scope ")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(get_color(&ActivePane::Scope))),
+    );
+    f.render_widget(p_scope, right_chunks[1]);
+
+    let p_subject = Paragraph::new(app.subject.as_str()).block(
+        Block::default()
+            .title(" Subject ")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(get_color(&ActivePane::Subject))),
+    );
+    f.render_widget(p_subject, right_chunks[2]);
+
+    let p_problem = Paragraph::new(app.problem.as_str()).block(
+        Block::default()
+            .title(" Problem ")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(get_color(&ActivePane::Problem))),
+    );
+    f.render_widget(p_problem, right_chunks[3]);
+
+    let p_solution = Paragraph::new(app.solution.as_str()).block(
+        Block::default()
+            .title(" Solution ")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(get_color(&ActivePane::Solution))),
+    );
+    f.render_widget(p_solution, right_chunks[4]);
 }
