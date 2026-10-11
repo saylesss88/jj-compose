@@ -108,33 +108,7 @@ fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<(), Box<dyn 
         {
             // Submit Block
             if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('s') {
-                let mut commit_msg = String::new();
-
-                // Format the header (handle empty scope gracefully)
-                if app.scope.trim().is_empty() {
-                    commit_msg.push_str(&format!(
-                        "{}: {}",
-                        app.commit_type.trim(),
-                        app.subject.trim()
-                    ));
-                } else {
-                    commit_msg.push_str(&format!(
-                        "{}({}): {}",
-                        app.commit_type.trim(),
-                        app.scope.trim(),
-                        app.subject.trim()
-                    ));
-                }
-
-                // Append Problem if it exists
-                if !app.problem.trim().is_empty() {
-                    commit_msg.push_str(&format!("\n\nProblem:\n{}", app.problem.trim()));
-                }
-
-                // Append Solution if it exists
-                if !app.solution.trim().is_empty() {
-                    commit_msg.push_str(&format!("\n\nSolution:\n{}", app.solution.trim()));
-                }
+                let commit_msg = commit_message(app);
 
                 // Execute jj describe
                 let _ = Command::new("jj")
@@ -227,6 +201,30 @@ fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// Formats 'type(scope): subject' plus optional Problem/Solution body
+fn commit_message(app: &App) -> String {
+    let ty = app.commit_type.trim();
+    let scope = app.scope.trim();
+    let subject = app.subject.trim();
+
+    let mut message = if scope.is_empty() {
+        format!("{ty}: {subject}")
+    } else {
+        format!("{ty}({scope}): {subject}")
+    };
+
+    for (label, body) in [("Problem", &app.problem), ("Solution", &app.solution)] {
+        let body = body.trim();
+        if !body.is_empty() {
+            message.push_str("\n\n");
+            message.push_str(label);
+            message.push_str(":\n");
+            message.push_str(body);
+        }
+    }
+    message
+}
+
 // The Rendering Function
 fn ui(f: &mut Frame, app: &App) {
     // 1. Split the entire screen in half horizontally
@@ -314,4 +312,34 @@ fn ui(f: &mut Frame, app: &App) {
             .style(Style::default().fg(get_color(&ActivePane::Solution))),
     );
     f.render_widget(p_solution, right_chunks[4]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_header_and_body() {
+        let app = App {
+            commit_type: " feat ".into(),
+            scope: "ui".into(),
+            subject: "add diff pane".into(),
+            problem: "No context.\n".into(),
+            ..App::default()
+        };
+        assert_eq!(
+            commit_message(&app),
+            "feat(ui): add diff pane\n\nProblem:\nNo context."
+        );
+    }
+
+    #[test]
+    fn omits_empty_scope() {
+        let app = App {
+            commit_type: "fix".into(),
+            subject: "handle empty repo".into(),
+            ..App::default()
+        };
+        assert_eq!(commit_message(&app), "fix: handle empty repo");
+    }
 }
