@@ -2,7 +2,7 @@ use std::{error::Error, process::Command};
 
 use ratatui::{
     DefaultTerminal, Frame,
-    crossterm::event::{self, Event, KeyCode, KeyModifiers},
+    crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     widgets::{Block, Borders, Paragraph},
@@ -102,7 +102,10 @@ fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<(), Box<dyn 
         terminal.draw(|f| ui(f, app))?;
 
         // Handle events (blocking wait for next keystroke)
-        if let Event::Key(key) = event::read()? {
+        // Ignore key *release* events
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
             // Submit Block
             if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('s') {
                 let mut commit_msg = String::new();
