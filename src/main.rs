@@ -1,13 +1,8 @@
-use std::{error::Error, io, process::Command};
+use std::{error::Error, process::Command};
 
-use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
 use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
+    DefaultTerminal, Frame,
+    crossterm::event::{self, Event, KeyCode, KeyModifiers},
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     widgets::{Block, Borders, Paragraph},
@@ -66,12 +61,7 @@ impl Default for App {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Setup terminal
-    enable_raw_mode()?;
-    let mut stderr = io::stderr();
-    execute!(stderr, EnterAlternateScreen)?; // Swaps to a clean screen
-    let backend = CrosstermBackend::new(stderr);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = ratatui::init();
 
     // Initialize state
     let mut app = App::default();
@@ -96,10 +86,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Run application loop
     let res = run_app(&mut terminal, &mut app);
 
-    // Teardown terminal
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    // Leave raw mode and the alternate screen
+    ratatui::restore();
 
     if let Err(err) = res {
         println!("{err:?}");
@@ -108,10 +96,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
-    app: &mut App,
-) -> Result<(), Box<dyn Error>> {
+fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<(), Box<dyn Error>> {
     while !app.should_quit {
         // Draw the UI
         terminal.draw(|f| ui(f, app))?;

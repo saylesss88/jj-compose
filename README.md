@@ -1,2 +1,9 @@
 # jj-compose
-Diff viewer and Conventional Commit composer for jj-vcs repositories
+
+Diff viewer and Conventional Commit composer for `jj-vcs` repositories
+
+## Usage
+
+```bash
+jj-compose
+```
