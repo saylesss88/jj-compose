@@ -40,7 +40,6 @@ pub struct App {
     pub active_pane: ActivePane,
     pub input_mode: InputMode,
     pub diff_scroll_position: u16,
-    pub should_quit: bool,
 }
 
 impl Default for App {
@@ -55,7 +54,6 @@ impl Default for App {
             active_pane: ActivePane::Type, // Start cursor here
             input_mode: InputMode::Normal, // Start in Normal mode
             diff_scroll_position: 0,
-            should_quit: false,
         }
     }
 }
@@ -84,20 +82,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Run application loop
-    let res = run_app(&mut terminal, &mut app);
+    let result = run_app(&mut terminal, &mut app);
 
     // Leave raw mode and the alternate screen
     ratatui::restore();
 
-    if let Err(err) = res {
-        println!("{err:?}");
+    // Run `jj describe` only after the terminal is restored, so its output
+    // (and any error) is visible to the user.
+    if let Some(message) = result? {
+        let status = Command::new("jj")
+            .args(["describe", "@", "-m", &message])
+            .status()?;
+        if !status.success() {
+            return Err(format!("jj describe failed ({status})").into());
+        }
     }
 
     Ok(())
 }
 
-fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<(), Box<dyn Error>> {
-    while !app.should_quit {
+fn run_app(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+) -> Result<Option<String>, Box<dyn Error>> {
+    loop {
         // Draw the UI
         terminal.draw(|f| ui(f, app))?;
 
@@ -108,20 +116,12 @@ fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<(), Box<dyn 
         {
             // Submit Block
             if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('s') {
-                let commit_msg = commit_message(app);
-
-                // Execute jj describe
-                let _ = Command::new("jj")
-                    .args(["describe", "-r", "@", "-m", &commit_msg])
-                    .status();
-
-                // Exit the TUI
-                app.should_quit = true;
-                continue;
+                // Hand the message back to main; it runs jj describe.
+                return Ok(Some(commit_message(app)));
             }
             match app.input_mode {
                 InputMode::Normal => match key.code {
-                    KeyCode::Char('q') => app.should_quit = true,
+                    KeyCode::Char('q') => return Ok(None),
 
                     KeyCode::Char('i') => app.input_mode = InputMode::Insert,
 
@@ -198,7 +198,6 @@ fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<(), Box<dyn 
             }
         }
     }
-    Ok(())
 }
 
 /// Formats 'type(scope): subject' plus optional Problem/Solution body
