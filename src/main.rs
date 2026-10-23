@@ -1,3 +1,18 @@
+//! A small TUI for writing Conventional Commit messages for the working-copy
+//! change in a `jj` repository.
+//!
+//! Message format:
+//!
+//! ```text
+//! type(scope): subject
+//!
+//! Problem:
+//! ...
+//!
+//! Solution:
+//! ...
+//! ```
+
 use std::{error::Error, io, process::Command};
 
 use ansi_to_tui::IntoText;
