@@ -3,9 +3,9 @@ use std::{error::Error, io, process::Command};
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
-    text::Line,
+    layout::{Constraint, Layout, Position, Rect},
+    style::{Color, Style, Stylize},
+    text::{Line, Span},
     widgets::{Block, Paragraph},
 };
 
@@ -289,8 +289,10 @@ impl App {
     // -----------------------------------------------------------------------
 
     fn draw(&mut self, frame: &mut Frame) {
+        let [main, status] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
         let [diff_area, form_area] =
-            Layout::horizontal([Constraint::Percentage(50); 2]).areas(frame.area());
+            Layout::horizontal([Constraint::Percentage(50); 2]).areas(main);
 
         // Remember the viewport height (minus the two border rows) so
         // scrolling knows where the end is.
@@ -312,26 +314,67 @@ impl App {
 
         for (field, area) in Field::ALL.into_iter().zip(field_areas) {
             let title = format!(" {} ", field.title());
-            let input =
-                Paragraph::new(self.draft.get(field)).block(self.pane(title, Focus::Field(field)));
+            let text = self.draft.get(field);
+            let input = Paragraph::new(text).block(self.pane(title, Focus::Field(field)));
             frame.render_widget(input, area);
+
+            // ratatui hides the cursor unless a frame places it.
+            if self.mode == Mode::Insert && self.focus == Focus::Field(field) {
+                frame.set_cursor_position(cursor_position(area, text));
+            }
         }
+        frame.render_widget(self.status_line(), status);
     }
 
-    /// A bordered box whose border and title are green when `target` has
-    /// focus and gray otherwise. The text inside keeps the default color.
+    /// A bordered box whose border and title show focus: green in Normal
+    /// mode, yellow in Insert mode, gray when unfocused. The text inside
+    /// keeps the default color.
     fn pane<'a>(&self, title: impl Into<Line<'a>>, target: Focus) -> Block<'a> {
-        let color = if self.focus == target {
-            Color::Green
-        } else {
-            Color::DarkGray
+        let style = match (self.focus == target, self.mode) {
+            (false, _) => Style::new().fg(Color::DarkGray),
+            (true, Mode::Normal) => Style::new().fg(Color::Green),
+            (true, Mode::Insert) => Style::new().fg(Color::Yellow),
         };
-        let style = Style::new().fg(color);
         Block::bordered()
             .title(title)
             .border_style(style)
             .title_style(style)
     }
+
+    /// Bottom row: the current mode and the keys that work in it.
+    fn status_line(&self) -> Line<'static> {
+        let (mode, keys) = match self.mode {
+            Mode::Normal => (
+                Span::raw(" NORMAL ").black().on_green(),
+                " i edit · j/k move/scroll · h/l diff/form · ^s commit · q quit",
+            ),
+            Mode::Insert => (
+                Span::raw(" INSERT ").black().on_yellow(),
+                " Esc normal · Enter newline · ^s commit",
+            ),
+        };
+        Line::from(vec![mode, Span::raw(keys).dark_gray()])
+    }
+}
+
+/// Cursor at the end of `text` inside a bordered `area`, clamped to the box.
+fn cursor_position(area: Rect, text: &str) -> Position {
+    let row = text.matches('\n').count();
+    let last_line = text.rsplit('\n').next().unwrap_or_default();
+    let col = Line::raw(last_line).width();
+
+    // +1 skips the left/top border; the min() keeps it inside the box.
+    let clamp = |offset: usize, start: u16, end: u16| {
+        let offset = u16::try_from(offset).unwrap_or(u16::MAX);
+        start
+            .saturating_add(1)
+            .saturating_add(offset)
+            .min(end.saturating_sub(2))
+    };
+    Position::new(
+        clamp(col, area.x, area.right()),
+        clamp(row, area.y, area.bottom()),
+    )
 }
 
 #[cfg(test)]
