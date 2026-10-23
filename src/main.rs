@@ -1,11 +1,12 @@
 use std::{error::Error, io, process::Command};
 
+use ansi_to_tui::IntoText;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style, Stylize},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Paragraph},
 };
 
@@ -15,8 +16,15 @@ const HEADER_SOFT_LIMIT: usize = 50;
 const HEADER_HARD_LIMIT: usize = 72;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // `--git` falls back to a plain git-format diff colored by this tool;
+    // the default uses jj's own colors and respects the user's jj config.
+    let format = if std::env::args().skip(1).any(|a| a == "--git") {
+        DiffFormat::Git
+    } else {
+        DiffFormat::Jj
+    };
     // Fail before touching the terminal: if we can't diff, we can't describe either.
-    let diff = load_diff()?;
+    let diff = load_diff(format)?;
 
     // `init` enters raw mode + the alternate screen and installs a panic hook
     // that restores the terminal, so a panic won't leave the shell garbled.
@@ -40,9 +48,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn load_diff() -> Result<String, Box<dyn Error>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffFormat {
+    /// `jj diff --color=always`: whatever format the user configured in jj
+    /// (color-words by default), ANSI-parsed into styled text.
+    Jj,
+    /// `jj diff --git`: plain unified diff, colored line-by-line here.
+    Git,
+}
+
+fn load_diff(format: DiffFormat) -> Result<Text<'static>, Box<dyn Error>> {
+    let args: &[&str] = match format {
+        DiffFormat::Jj => &["diff", "-r", "@", "--color=always"],
+        DiffFormat::Git => &["diff", "-r", "@", "--git", "--color=never"],
+    };
     let output = Command::new("jj")
-        .args(["diff", "-r", "@", "--git"])
+        .args(args)
         .output()
         .map_err(|e| format!("failed to run jj: {e}"))?;
 
@@ -50,11 +71,18 @@ fn load_diff() -> Result<String, Box<dyn Error>> {
         return Err(String::from_utf8_lossy(&output.stderr).trim().into());
     }
 
-    let diff = String::from_utf8_lossy(&output.stdout).into_owned();
-    Ok(if diff.trim().is_empty() {
-        "(no changes in @)".to_owned()
-    } else {
-        diff
+    if output.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Text::raw("(no changes in @)"));
+    }
+
+    Ok(match format {
+        // Turn the ANSI escape codes into ratatui styles instead of
+        // printing them as literal `[38;5;2m` garbage.
+        DiffFormat::Jj => output.stdout.into_text()?,
+        DiffFormat::Git => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(diff_line)
+            .collect(),
     })
 }
 
@@ -173,7 +201,7 @@ impl Draft {
 }
 
 // ---------------------------------------------------------------------------
-// Application state
+// Application state + input handling
 // ---------------------------------------------------------------------------
 
 /// Where keyboard focus is: the diff pane, or one of the form fields.
@@ -197,7 +225,7 @@ enum Exit {
 }
 
 struct App {
-    diff: String,
+    diff: Text<'static>,
     diff_len: u16,
     diff_scroll: u16,
     /// Rows visible inside the diff pane, updated on every draw.
@@ -212,8 +240,8 @@ struct App {
 }
 
 impl App {
-    fn new(diff: String) -> Self {
-        let diff_len = u16::try_from(diff.lines().count()).unwrap_or(u16::MAX);
+    fn new(diff: Text<'static>) -> Self {
+        let diff_len = u16::try_from(diff.lines.len()).unwrap_or(u16::MAX);
         Self {
             diff,
             diff_len,
@@ -330,14 +358,14 @@ impl App {
     }
 
     /// The field that Tab moves from, or that `l` returns to.
-    fn current_field(&self) -> Field {
+    const fn current_field(&self) -> Field {
         match self.focus {
             Focus::Field(f) => f,
             Focus::Diff => self.last_field,
         }
     }
 
-    fn focus_field(&mut self, field: Field) {
+    const fn focus_field(&mut self, field: Field) {
         self.focus = Focus::Field(field);
         self.last_field = field;
     }
@@ -368,11 +396,10 @@ impl App {
         let [diff_area, form_area] =
             Layout::horizontal([Constraint::Percentage(50); 2]).areas(main);
 
-        // Remember the viewport height (minus the two border rows) so
-        // scrolling knows where the end is.
+        // Remember the viewport height for half-page scrolling and clamping.
         self.diff_height = diff_area.height.saturating_sub(2);
 
-        let diff = Paragraph::new(self.diff.lines().map(diff_line).collect::<Vec<_>>())
+        let diff = Paragraph::new(self.diff.clone())
             .block(self.pane(" Diff (@) ", Focus::Diff))
             .scroll((self.diff_scroll, 0));
         frame.render_widget(diff, diff_area);
@@ -400,9 +427,6 @@ impl App {
         frame.render_widget(self.status_line(), status);
     }
 
-    /// A bordered box whose border and title show focus: green in Normal
-    /// mode, yellow in Insert mode, gray when unfocused. The text inside
-    /// keeps the default color.
     fn pane<'a>(&self, title: impl Into<Line<'a>>, target: Focus) -> Block<'a> {
         let style = match (self.focus == target, self.mode) {
             (false, _) => Style::new().fg(Color::DarkGray),
@@ -457,7 +481,7 @@ impl App {
 }
 
 /// Color one line of a git-format diff by what kind of line it is.
-fn diff_line(line: &str) -> Line<'_> {
+fn diff_line(line: &str) -> Line<'static> {
     let style = if line.starts_with("diff --git") {
         Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else if line.starts_with("+++") || line.starts_with("---") {
@@ -473,7 +497,7 @@ fn diff_line(line: &str) -> Line<'_> {
     } else {
         Style::new()
     };
-    Line::styled(line, style)
+    Line::styled(line.to_owned(), style)
 }
 
 /// Cursor at the end of `text` inside a bordered `area`, clamped to the box.
@@ -507,7 +531,13 @@ mod tests {
     }
 
     #[test]
-    fn formats_header_and_body() {
+    fn header_only() {
+        let d = draft("fix", "", "handle empty repo", "", "");
+        assert_eq!(d.build().unwrap(), "fix: handle empty repo");
+    }
+
+    #[test]
+    fn full_message() {
         let d = draft(
             " feat ",
             "ui",
@@ -519,12 +549,6 @@ mod tests {
             d.build().unwrap(),
             "feat(ui): add diff pane\n\nProblem:\nNo context.\n\nSolution:\nShow `jj diff`."
         );
-    }
-
-    #[test]
-    fn omits_empty_scope() {
-        let d = draft("fix", "", "handle empty repo", "", "");
-        assert_eq!(d.build().unwrap(), "fix: handle empty repo");
     }
 
     #[test]
