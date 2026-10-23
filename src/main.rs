@@ -214,7 +214,7 @@ impl App {
 
         match self.mode {
             Mode::Normal => return self.normal_key(key.code),
-            Mode::Insert => self.insert_key(key.code),
+            Mode::Insert => self.insert_key(key.code, ctrl),
         }
         None
     }
@@ -244,7 +244,7 @@ impl App {
         None
     }
 
-    fn insert_key(&mut self, code: KeyCode) {
+    fn insert_key(&mut self, code: KeyCode, ctrl: bool) {
         // You can't type into the diff pane; Esc still leaves Insert.
         let Focus::Field(field) = self.focus else {
             if code == KeyCode::Esc {
@@ -256,7 +256,8 @@ impl App {
 
         match code {
             KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Char(c) => buf.push(c),
+            // Ctrl+<letter> is a command, not text.
+            KeyCode::Char(c) if !ctrl => buf.push(c),
             KeyCode::Backspace => {
                 buf.pop();
             }
