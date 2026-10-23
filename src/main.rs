@@ -295,14 +295,19 @@ impl App {
         }
     }
 
-    /// A bordered box, green when `target` has focus and gray otherwise.
+    /// A bordered box whose border and title are green when `target` has
+    /// focus and gray otherwise. The text inside keeps the default color.
     fn pane<'a>(&self, title: impl Into<Line<'a>>, target: Focus) -> Block<'a> {
         let color = if self.focus == target {
             Color::Green
         } else {
             Color::DarkGray
         };
-        Block::bordered().title(title).style(Style::new().fg(color))
+        let style = Style::new().fg(color);
+        Block::bordered()
+            .title(title)
+            .border_style(style)
+            .title_style(style)
     }
 }
 
