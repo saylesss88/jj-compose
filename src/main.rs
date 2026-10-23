@@ -3,9 +3,10 @@ use std::{error::Error, process::Command};
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, Paragraph},
+    text::Line,
+    widgets::{Block, Paragraph},
 };
 
 // Track where the user's cursor currently is
@@ -25,39 +26,6 @@ pub enum InputMode {
     Insert, // Typing actual commit text
 }
 
-pub struct App {
-    // Jujutsu Data
-    pub diff_content: String,
-
-    // User Input Buffers
-    pub commit_type: String,
-    pub scope: String,
-    pub subject: String,
-    pub problem: String,
-    pub solution: String,
-
-    // UI State
-    pub active_pane: ActivePane,
-    pub input_mode: InputMode,
-    pub diff_scroll_position: u16,
-}
-
-impl Default for App {
-    fn default() -> Self {
-        Self {
-            diff_content: String::new(),
-            commit_type: String::new(),
-            scope: String::new(),
-            subject: String::new(),
-            problem: String::new(),
-            solution: String::new(),
-            active_pane: ActivePane::Type, // Start cursor here
-            input_mode: InputMode::Normal, // Start in Normal mode
-            diff_scroll_position: 0,
-        }
-    }
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     // Fail before touching the terminal: if we can't diff, we can't describe either.
     let diff = load_diff()?;
@@ -65,11 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = ratatui::init();
 
     // Initialize state
-    let mut app = App {
-        diff_content: diff,
-        ..App::default()
-    };
-
+    let mut app = App::new(diff);
     // Run application loop
     let result = run_app(&mut terminal, &mut app);
 
@@ -108,6 +72,136 @@ fn load_diff() -> Result<String, Box<dyn Error>> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Commit message model
+// ---------------------------------------------------------------------------
+
+/// One input box in the form, in on-screen order
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Type,
+    Scope,
+    Subject,
+    Problem,
+    Solution,
+}
+
+impl Field {
+    const ALL: [Self; 5] = [
+        Self::Type,
+        Self::Scope,
+        Self::Subject,
+        Self::Problem,
+        Self::Solution,
+    ];
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Type => "Type",
+            Self::Scope => "Scope",
+            Self::Subject => "Subject",
+            Self::Problem => "Problem",
+            Self::Solution => "Solution",
+        }
+    }
+
+    const fn is_multiline(self) -> bool {
+        matches!(self, Self::Problem | Self::Solution)
+    }
+
+    /// The field below this one (stays put on the last field).
+    fn next(self) -> Self {
+        Self::ALL[(self as usize + 1).min(Self::ALL.len() - 1)]
+    }
+
+    /// The field above this one (stays put on the first field).
+    const fn prev(self) -> Self {
+        Self::ALL[(self as usize).saturating_sub(1)]
+    }
+}
+
+/// The text the user has typed so far, one buffer per [`Field`].
+#[derive(Debug, Default)]
+struct Draft {
+    inputs: [String; Field::ALL.len()],
+}
+
+impl Draft {
+    fn get(&self, field: Field) -> &str {
+        &self.inputs[field as usize]
+    }
+
+    const fn get_mut(&mut self, field: Field) -> &mut String {
+        &mut self.inputs[field as usize]
+    }
+
+    /// `type(scope): subject`
+    fn header(&self) -> String {
+        let ty = self.get(Field::Type).trim();
+        let scope = self.get(Field::Scope).trim();
+        let subject = self.get(Field::Subject).trim();
+
+        if scope.is_empty() {
+            format!("{ty}: {subject}")
+        } else {
+            format!("{ty}({scope}): {subject}")
+        }
+    }
+
+    /// The header plus the optional Problem/Solution body.
+    fn build(&self) -> String {
+        let mut message = self.header();
+        for field in [Field::Problem, Field::Solution] {
+            let body = self.get(field).trim();
+            if !body.is_empty() {
+                message.push_str("\n\n");
+                message.push_str(field.title());
+                message.push_str(":\n");
+                message.push_str(body);
+            }
+        }
+        message
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Application state
+// ---------------------------------------------------------------------------
+
+/// Where keyboard focus is: the diff pane, or one of the form fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    Diff,
+    Field(Field),
+}
+
+/// Navigating (Normal) or typing (Insert).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Normal,
+    Insert,
+}
+
+struct App {
+    diff: String,
+    diff_scroll: u16,
+    draft: Draft,
+    focus: Focus,
+    mode: Mode,
+}
+
+impl App {
+    fn new(diff: String) -> Self {
+        Self {
+            diff,
+            diff_scroll: 0,
+            draft: Draft::default(),
+            focus: Focus::Field(Field::Type),
+            mode: Mode::Normal,
+        }
+    }
+}
+
 fn run_app(
     terminal: &mut DefaultTerminal,
     app: &mut App,
@@ -116,236 +210,127 @@ fn run_app(
         // Draw the UI
         terminal.draw(|f| ui(f, app))?;
 
-        // Handle events (blocking wait for next keystroke)
-        // Ignore key *release* events
-        if let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            // Submit Block
-            if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('s') {
-                // Hand the message back to main; it runs jj describe.
-                return Ok(Some(commit_message(app)));
-            }
-            match app.input_mode {
-                InputMode::Normal => match key.code {
-                    KeyCode::Char('q') => return Ok(None),
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        // Submit Block
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('s') {
+            // Hand the message back to main; it runs jj describe.
+            return Ok(Some(app.draft.build()));
+        }
 
-                    KeyCode::Char('i') => app.input_mode = InputMode::Insert,
+        match app.mode {
+            Mode::Normal => match (key.code, app.focus) {
+                (KeyCode::Char('q'), _) => return Ok(None),
+                (KeyCode::Char('i'), _) => app.mode = Mode::Insert,
 
-                    // Left/Right navigation
-                    KeyCode::Char('h') => app.active_pane = ActivePane::DiffViewer,
-                    KeyCode::Char('l') => app.active_pane = ActivePane::Type, // Jump back to forms
+                (KeyCode::Char('h'), _) => app.focus = Focus::Diff,
+                (KeyCode::Char('l'), _) => app.focus = Focus::Field(Field::Type),
 
-                    // Up/Down navigation through the right-side forms
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        if matches!(app.active_pane, ActivePane::DiffViewer) {
-                            // Scroll down
-                            app.diff_scroll_position = app.diff_scroll_position.saturating_add(1);
-                        } else {
-                            app.active_pane = match app.active_pane {
-                                ActivePane::Type => ActivePane::Scope,
-                                ActivePane::Scope => ActivePane::Subject,
-                                ActivePane::Subject => ActivePane::Problem,
-                                ActivePane::Problem => ActivePane::Solution,
-                                _ => app.active_pane, // Do nothing if in Solution or DiffViewer
-                            }
-                        }
+                (KeyCode::Char('j') | KeyCode::Down, Focus::Diff) => {
+                    app.diff_scroll = app.diff_scroll.saturating_add(1);
+                }
+                (KeyCode::Char('k') | KeyCode::Up, Focus::Diff) => {
+                    app.diff_scroll = app.diff_scroll.saturating_sub(1);
+                }
+                (KeyCode::Char('j') | KeyCode::Down, Focus::Field(f)) => {
+                    app.focus = Focus::Field(f.next());
+                }
+                (KeyCode::Char('k') | KeyCode::Up, Focus::Field(f)) => {
+                    app.focus = Focus::Field(f.prev());
+                }
+                _ => {}
+            },
+            Mode::Insert => {
+                // You can't type into the diff pane; Esc still leaves Insert.
+                let Focus::Field(field) = app.focus else {
+                    if key.code == KeyCode::Esc {
+                        app.mode = Mode::Normal;
                     }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        if matches!(app.active_pane, ActivePane::DiffViewer) {
-                            // Scroll up
-                            app.diff_scroll_position = app.diff_scroll_position.saturating_sub(1);
-                        } else {
-                            app.active_pane = match app.active_pane {
-                                ActivePane::Scope => ActivePane::Type,
-                                ActivePane::Subject => ActivePane::Scope,
-                                ActivePane::Problem => ActivePane::Subject,
-                                ActivePane::Solution => ActivePane::Problem,
-                                _ => app.active_pane,
-                            }
-                        }
+                    continue;
+                };
+                let buf = app.draft.get_mut(field);
+
+                match key.code {
+                    KeyCode::Esc => app.mode = Mode::Normal,
+                    KeyCode::Char(c) => buf.push(c),
+                    KeyCode::Backspace => {
+                        buf.pop();
                     }
+                    KeyCode::Enter if field.is_multiline() => buf.push('\n'),
                     _ => {}
-                },
-                InputMode::Insert => {
-                    // 1. Get a mutable reference to the currently active text buffer
-                    let active_buffer = match app.active_pane {
-                        ActivePane::Type => Some(&mut app.commit_type),
-                        ActivePane::Scope => Some(&mut app.scope),
-                        ActivePane::Subject => Some(&mut app.subject),
-                        ActivePane::Problem => Some(&mut app.problem),
-                        ActivePane::Solution => Some(&mut app.solution),
-                        ActivePane::DiffViewer => None, // Cannot type in the diff viewer
-                    };
-
-                    // 2. Handle the keystrokes
-                    match key.code {
-                        KeyCode::Esc => app.input_mode = InputMode::Normal,
-                        KeyCode::Char(c) => {
-                            if let Some(buf) = active_buffer {
-                                buf.push(c);
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            if let Some(buf) = active_buffer {
-                                buf.pop(); // Removes the last character
-                            }
-                        }
-                        KeyCode::Enter => {
-                            // Only allow multi-line text in the Problem and Solution boxes
-                            if matches!(app.active_pane, ActivePane::Problem | ActivePane::Solution)
-                                && let Some(buf) = active_buffer
-                            {
-                                buf.push('\n');
-                            }
-                        }
-                        _ => {}
-                    }
                 }
             }
         }
     }
 }
 
-/// Formats 'type(scope): subject' plus optional Problem/Solution body
-fn commit_message(app: &App) -> String {
-    let ty = app.commit_type.trim();
-    let scope = app.scope.trim();
-    let subject = app.subject.trim();
-
-    let mut message = if scope.is_empty() {
-        format!("{ty}: {subject}")
-    } else {
-        format!("{ty}({scope}): {subject}")
-    };
-
-    for (label, body) in [("Problem", &app.problem), ("Solution", &app.solution)] {
-        let body = body.trim();
-        if !body.is_empty() {
-            message.push_str("\n\n");
-            message.push_str(label);
-            message.push_str(":\n");
-            message.push_str(body);
-        }
-    }
-    message
-}
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
 
 // The Rendering Function
 fn ui(f: &mut Frame, app: &App) {
-    // 1. Split the entire screen in half horizontally
-    let main_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(f.area());
+    let [diff_area, form_area] =
+        Layout::horizontal([Constraint::Percentage(50); 2]).areas(f.area());
 
-    // 2. Draw the Left Side (Diff Viewer)
-    let diff_color = if matches!(app.active_pane, ActivePane::DiffViewer) {
+    let diff = Paragraph::new(app.diff.as_str())
+        .block(pane(" Diff (@) ", app.focus == Focus::Diff))
+        .scroll((app.diff_scroll, 0));
+    f.render_widget(diff, diff_area);
+
+    let field_areas: [Rect; 5] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Fill(1),
+        Constraint::Fill(1),
+    ])
+    .areas(form_area);
+
+    for (field, area) in Field::ALL.into_iter().zip(field_areas) {
+        let title = format!(" {} ", field.title());
+        let input = Paragraph::new(app.draft.get(field))
+            .block(pane(title, app.focus == Focus::Field(field)));
+        f.render_widget(input, area);
+    }
+}
+
+/// A bordered box, green when focused and gray otherwise.
+fn pane<'a>(title: impl Into<Line<'a>>, focused: bool) -> Block<'a> {
+    let color = if focused {
         Color::Green
     } else {
         Color::DarkGray
     };
-    let diff_block = Paragraph::new(app.diff_content.as_str())
-        .block(
-            Block::default()
-                .title(" Diff (@) ")
-                .borders(Borders::ALL)
-                .style(Style::default().fg(diff_color)),
-        )
-        .scroll((app.diff_scroll_position, 0));
-
-    f.render_widget(diff_block, main_chunks[0]);
-
-    // 3. Split the Right Side vertically for the input forms
-    let right_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Type
-            Constraint::Length(3), // Scope
-            Constraint::Length(3), // Subject
-            Constraint::Min(5),    // Problem (expands to fill space)
-            Constraint::Min(5),    // Solution (expands to fill space)
-        ])
-        .split(main_chunks[1]);
-
-    // Helper macro/function to draw input boxes with the correct highlight color
-    let get_color = |target_pane: &ActivePane| -> Color {
-        // If the app's active pane matches this box, highlight it Green
-        if std::mem::discriminant(&app.active_pane) == std::mem::discriminant(target_pane) {
-            Color::Green
-        } else {
-            Color::DarkGray
-        }
-    };
-
-    // 4. Draw each input box on the right side
-    let p_type = Paragraph::new(app.commit_type.as_str()).block(
-        Block::default()
-            .title(" Type ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(get_color(&ActivePane::Type))),
-    );
-    f.render_widget(p_type, right_chunks[0]);
-
-    let p_scope = Paragraph::new(app.scope.as_str()).block(
-        Block::default()
-            .title(" Scope ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(get_color(&ActivePane::Scope))),
-    );
-    f.render_widget(p_scope, right_chunks[1]);
-
-    let p_subject = Paragraph::new(app.subject.as_str()).block(
-        Block::default()
-            .title(" Subject ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(get_color(&ActivePane::Subject))),
-    );
-    f.render_widget(p_subject, right_chunks[2]);
-
-    let p_problem = Paragraph::new(app.problem.as_str()).block(
-        Block::default()
-            .title(" Problem ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(get_color(&ActivePane::Problem))),
-    );
-    f.render_widget(p_problem, right_chunks[3]);
-
-    let p_solution = Paragraph::new(app.solution.as_str()).block(
-        Block::default()
-            .title(" Solution ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(get_color(&ActivePane::Solution))),
-    );
-    f.render_widget(p_solution, right_chunks[4]);
+    Block::bordered().title(title).style(Style::new().fg(color))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn draft(ty: &str, scope: &str, subject: &str, problem: &str, solution: &str) -> Draft {
+        Draft {
+            inputs: [ty, scope, subject, problem, solution].map(str::to_owned),
+        }
+    }
+
     #[test]
     fn formats_header_and_body() {
-        let app = App {
-            commit_type: " feat ".into(),
-            scope: "ui".into(),
-            subject: "add diff pane".into(),
-            problem: "No context.\n".into(),
-            ..App::default()
-        };
+        let d = draft(" feat ", "ui", "add diff pane", "No context.\n", "");
         assert_eq!(
-            commit_message(&app),
+            d.build(),
             "feat(ui): add diff pane\n\nProblem:\nNo context."
         );
     }
 
     #[test]
     fn omits_empty_scope() {
-        let app = App {
-            commit_type: "fix".into(),
-            subject: "handle empty repo".into(),
-            ..App::default()
-        };
-        assert_eq!(commit_message(&app), "fix: handle empty repo");
+        let d = draft("fix", "", "handle empty repo", "", "");
+        assert_eq!(d.build(), "fix: handle empty repo");
     }
 }
