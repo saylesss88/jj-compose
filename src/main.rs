@@ -4,7 +4,7 @@ use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Layout, Position, Rect},
-    style::{Color, Style, Stylize},
+    style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, Paragraph},
 };
@@ -299,9 +299,7 @@ impl App {
     fn insert_key(&mut self, code: KeyCode, ctrl: bool) {
         // You can't type into the diff pane; Esc still leaves Insert.
         let Focus::Field(field) = self.focus else {
-            if code == KeyCode::Esc {
-                self.mode = Mode::Normal;
-            }
+            self.mode = Mode::Normal;
             return;
         };
         let buf = self.draft.get_mut(field);
@@ -314,6 +312,8 @@ impl App {
                 buf.pop();
             }
             KeyCode::Enter if field.is_multiline() => buf.push('\n'),
+            // Enter on a one-line field moves on, like a form.
+            KeyCode::Enter => self.focus_field(field.next()),
             _ => {}
         }
     }
@@ -372,7 +372,7 @@ impl App {
         // scrolling knows where the end is.
         self.diff_height = diff_area.height.saturating_sub(2);
 
-        let diff = Paragraph::new(self.diff.as_str())
+        let diff = Paragraph::new(self.diff.lines().map(diff_line).collect::<Vec<_>>())
             .block(self.pane(" Diff (@) ", Focus::Diff))
             .scroll((self.diff_scroll, 0));
         frame.render_widget(diff, diff_area);
@@ -454,6 +454,26 @@ impl App {
         };
         Line::from(vec![mode, Span::raw(keys).dark_gray()])
     }
+}
+
+/// Color one line of a git-format diff by what kind of line it is.
+fn diff_line(line: &str) -> Line<'_> {
+    let style = if line.starts_with("diff --git") {
+        Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else if line.starts_with("+++") || line.starts_with("---") {
+        Style::new().add_modifier(Modifier::BOLD)
+    } else if line.starts_with("@@") {
+        Style::new().fg(Color::Cyan)
+    } else if line.starts_with('+') {
+        Style::new().fg(Color::Green)
+    } else if line.starts_with('-') {
+        Style::new().fg(Color::Red)
+    } else if line.starts_with("index ") || line.contains(" mode ") {
+        Style::new().fg(Color::DarkGray)
+    } else {
+        Style::new()
+    };
+    Line::styled(line, style)
 }
 
 /// Cursor at the end of `text` inside a bordered `area`, clamped to the box.
