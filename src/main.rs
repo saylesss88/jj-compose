@@ -116,23 +116,31 @@ impl Draft {
         &mut self.inputs[field as usize]
     }
 
-    /// `type(scope): subject`
+    /// `type(scope)!: subject`. A trailing `!` on the type marks a breaking
+    /// change and is moved after the scope, per the Conventional Commits spec.
     fn header(&self) -> String {
         let ty = self.get(Field::Type).trim();
+        let (ty, bang) = ty
+            .strip_suffix('!')
+            .map_or((ty, ""), |ty| (ty.trim_end(), "!"));
+        // let (ty, bang) = match ty.strip_suffix('!') {
+        //     Some(ty) => (ty.trim_end(), "!"),
+        //     None => (ty, ""),
+        // };
         let scope = self.get(Field::Scope).trim();
         let subject = self.get(Field::Subject).trim();
 
         if scope.is_empty() {
-            format!("{ty}: {subject}")
+            format!("{ty}{bang}: {subject}")
         } else {
-            format!("{ty}({scope}): {subject}")
+            format!("{ty}({scope}){bang}: {subject}")
         }
     }
 
     /// The header plus the optional Problem/Solution body, or the first
     /// reason the header isn't a valid Conventional Commit
     fn build(&self) -> Result<String, &'static str> {
-        let ty = self.get(Field::Type).trim();
+        let ty = self.get(Field::Type).trim().trim_end_matches('!');
         if ty.is_empty() {
             return Err("type is required (feat, fix, refactor, ...)");
         }
@@ -302,7 +310,7 @@ impl App {
     }
 
     /// The last scroll offset that still fills the pane.
-    fn max_scroll(&self) -> u16 {
+    const fn max_scroll(&self) -> u16 {
         self.diff_len.saturating_sub(self.diff_height)
     }
 
@@ -442,6 +450,12 @@ mod tests {
     fn omits_empty_scope() {
         let d = draft("fix", "", "handle empty repo", "", "");
         assert_eq!(d.build().unwrap(), "fix: handle empty repo");
+    }
+
+    #[test]
+    fn breaking_change_bang_goes_after_scope() {
+        let d = draft("feat!", "api", "drop v1 endpoints", "", "");
+        assert_eq!(d.build().unwrap(), "feat(api)!: drop v1 endpoints");
     }
 
     #[test]
