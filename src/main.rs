@@ -59,32 +59,21 @@ impl Default for App {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Fail before touching the terminal: if we can't diff, we can't describe either.
+    let diff = load_diff()?;
+
     let mut terminal = ratatui::init();
 
     // Initialize state
-    let mut app = App::default();
-
-    let output = Command::new("jj")
-        .args(["diff", "-r", "@", "--git"])
-        .output();
-
-    match output {
-        Ok(output) if output.status.success() => {
-            app.diff_content = String::from_utf8_lossy(&output.stdout).into_owned();
-        }
-        Ok(output) => {
-            // If jj throws an error (e.g., not in a repo), show the error in the diff pane
-            app.diff_content = String::from_utf8_lossy(&output.stderr).into_owned();
-        }
-        Err(e) => {
-            app.diff_content = format!("Failed to run jj command: {e}");
-        }
-    }
+    let mut app = App {
+        diff_content: diff,
+        ..App::default()
+    };
 
     // Run application loop
     let result = run_app(&mut terminal, &mut app);
 
-    // Leave raw mode and the alternate screen
+    // Leave raw mode and the alternate screen.
     ratatui::restore();
 
     // Run `jj describe` only after the terminal is restored, so its output
@@ -99,6 +88,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn load_diff() -> Result<String, Box<dyn Error>> {
+    let output = Command::new("jj")
+        .args(["diff", "-r", "@", "--git"])
+        .output()
+        .map_err(|e| format!("failed to run jj: {e}"))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().into());
+    }
+
+    let diff = String::from_utf8_lossy(&output.stdout).into_owned();
+    Ok(if diff.trim().is_empty() {
+        "(no changes in @)".to_owned()
+    } else {
+        diff
+    })
 }
 
 fn run_app(
