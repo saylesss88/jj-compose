@@ -171,7 +171,10 @@ enum Exit {
 
 struct App {
     diff: String,
+    diff_len: u16,
     diff_scroll: u16,
+    /// Rows visible inside the diff pane, updated on every draw.
+    diff_height: u16,
     draft: Draft,
     focus: Focus,
     mode: Mode,
@@ -179,9 +182,12 @@ struct App {
 
 impl App {
     fn new(diff: String) -> Self {
+        let diff_len = u16::try_from(diff.lines().count()).unwrap_or(u16::MAX);
         Self {
             diff,
+            diff_len,
             diff_scroll: 0,
+            diff_height: 0,
             draft: Draft::default(),
             focus: Focus::Field(Field::Type),
             mode: Mode::Normal,
@@ -227,12 +233,8 @@ impl App {
             (KeyCode::Char('h'), _) => self.focus = Focus::Diff,
             (KeyCode::Char('l'), _) => self.focus = Focus::Field(Field::Type),
 
-            (KeyCode::Char('j') | KeyCode::Down, Focus::Diff) => {
-                self.diff_scroll = self.diff_scroll.saturating_add(1);
-            }
-            (KeyCode::Char('k') | KeyCode::Up, Focus::Diff) => {
-                self.diff_scroll = self.diff_scroll.saturating_sub(1);
-            }
+            (KeyCode::Char('j') | KeyCode::Down, Focus::Diff) => self.scroll_down(1),
+            (KeyCode::Char('k') | KeyCode::Up, Focus::Diff) => self.scroll_up(1),
             (KeyCode::Char('j') | KeyCode::Down, Focus::Field(f)) => {
                 self.focus = Focus::Field(f.next());
             }
@@ -266,13 +268,33 @@ impl App {
         }
     }
 
+    /// The last scroll offset that still fills the pane.
+    fn max_scroll(&self) -> u16 {
+        self.diff_len.saturating_sub(self.diff_height)
+    }
+
+    fn scroll_down(&mut self, n: u16) {
+        self.diff_scroll = self
+            .diff_scroll
+            .saturating_add(n.max(1))
+            .min(self.max_scroll());
+    }
+
+    fn scroll_up(&mut self, n: u16) {
+        self.diff_scroll = self.diff_scroll.saturating_sub(n.max(1));
+    }
+
     // -----------------------------------------------------------------------
     // Rendering
     // -----------------------------------------------------------------------
 
-    fn draw(&self, frame: &mut Frame) {
+    fn draw(&mut self, frame: &mut Frame) {
         let [diff_area, form_area] =
             Layout::horizontal([Constraint::Percentage(50); 2]).areas(frame.area());
+
+        // Remember the viewport height (minus the two border rows) so
+        // scrolling knows where the end is.
+        self.diff_height = diff_area.height.saturating_sub(2);
 
         let diff = Paragraph::new(self.diff.as_str())
             .block(self.pane(" Diff (@) ", Focus::Diff))
