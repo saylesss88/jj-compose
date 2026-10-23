@@ -1,41 +1,22 @@
-use std::{error::Error, process::Command};
+use std::{error::Error, io, process::Command};
 
 use ratatui::{
     DefaultTerminal, Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
     text::Line,
     widgets::{Block, Paragraph},
 };
 
-// Track where the user's cursor currently is
-#[derive(Clone, Copy)]
-pub enum ActivePane {
-    Type,       // e.g., feat, fix, chore
-    Scope,      // e.g., ui, backend
-    Subject,    // The short summary
-    Problem,    // The "Problem:" text block
-    Solution,   // The "Solution:" text block
-    DiffViewer, // Scrolling through the diff
-}
-
-// Track if they are navigating or typing
-pub enum InputMode {
-    Normal, // H/J/K/L to move between panes or scroll diff
-    Insert, // Typing actual commit text
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     // Fail before touching the terminal: if we can't diff, we can't describe either.
     let diff = load_diff()?;
 
+    // `init` enters raw mode + the alternate screen and installs a panic hook
+    // that restores the terminal, so a panic won't leave the shell garbled.
     let mut terminal = ratatui::init();
-
-    // Initialize state
-    let mut app = App::new(diff);
-    // Run application loop
-    let result = run_app(&mut terminal, &mut app);
+    let result = App::new(diff).run(&mut terminal);
 
     // Leave raw mode and the alternate screen.
     ratatui::restore();
@@ -182,6 +163,12 @@ enum Mode {
     Insert,
 }
 
+/// How the event loop ended.
+enum Exit {
+    Abort,
+    Commit(String),
+}
+
 struct App {
     diff: String,
     diff_scroll: u16,
@@ -200,113 +187,123 @@ impl App {
             mode: Mode::Normal,
         }
     }
-}
+    /// Returns the finished commit message, or `None` if the user quit.
+    fn run(mut self, terminal: &mut DefaultTerminal) -> io::Result<Option<String>> {
+        loop {
+            terminal.draw(|frame| self.draw(frame))?;
 
-fn run_app(
-    terminal: &mut DefaultTerminal,
-    app: &mut App,
-) -> Result<Option<String>, Box<dyn Error>> {
-    loop {
-        // Draw the UI
-        terminal.draw(|f| ui(f, app))?;
-
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        // Submit Block
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('s') {
-            // Hand the message back to main; it runs jj describe.
-            return Ok(Some(app.draft.build()));
-        }
-
-        match app.mode {
-            Mode::Normal => match (key.code, app.focus) {
-                (KeyCode::Char('q'), _) => return Ok(None),
-                (KeyCode::Char('i'), _) => app.mode = Mode::Insert,
-
-                (KeyCode::Char('h'), _) => app.focus = Focus::Diff,
-                (KeyCode::Char('l'), _) => app.focus = Focus::Field(Field::Type),
-
-                (KeyCode::Char('j') | KeyCode::Down, Focus::Diff) => {
-                    app.diff_scroll = app.diff_scroll.saturating_add(1);
-                }
-                (KeyCode::Char('k') | KeyCode::Up, Focus::Diff) => {
-                    app.diff_scroll = app.diff_scroll.saturating_sub(1);
-                }
-                (KeyCode::Char('j') | KeyCode::Down, Focus::Field(f)) => {
-                    app.focus = Focus::Field(f.next());
-                }
-                (KeyCode::Char('k') | KeyCode::Up, Focus::Field(f)) => {
-                    app.focus = Focus::Field(f.prev());
-                }
-                _ => {}
-            },
-            Mode::Insert => {
-                // You can't type into the diff pane; Esc still leaves Insert.
-                let Focus::Field(field) = app.focus else {
-                    if key.code == KeyCode::Esc {
-                        app.mode = Mode::Normal;
-                    }
-                    continue;
-                };
-                let buf = app.draft.get_mut(field);
-
-                match key.code {
-                    KeyCode::Esc => app.mode = Mode::Normal,
-                    KeyCode::Char(c) => buf.push(c),
-                    KeyCode::Backspace => {
-                        buf.pop();
-                    }
-                    KeyCode::Enter if field.is_multiline() => buf.push('\n'),
-                    _ => {}
-                }
+            // Ignore key *release* events (reported on Windows and with the
+            // kitty keyboard protocol), or every keystroke registers twice.
+            if let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+                && let Some(exit) = self.handle_key(key)
+            {
+                return Ok(match exit {
+                    Exit::Abort => None,
+                    Exit::Commit(message) => Some(message),
+                });
             }
         }
     }
-}
 
-// ---------------------------------------------------------------------------
-// Rendering
-// ---------------------------------------------------------------------------
+    fn handle_key(&mut self, key: KeyEvent) -> Option<Exit> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('s') {
+            return Some(Exit::Commit(self.draft.build()));
+        }
 
-// The Rendering Function
-fn ui(f: &mut Frame, app: &App) {
-    let [diff_area, form_area] =
-        Layout::horizontal([Constraint::Percentage(50); 2]).areas(f.area());
-
-    let diff = Paragraph::new(app.diff.as_str())
-        .block(pane(" Diff (@) ", app.focus == Focus::Diff))
-        .scroll((app.diff_scroll, 0));
-    f.render_widget(diff, diff_area);
-
-    let field_areas: [Rect; 5] = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Length(3),
-        Constraint::Length(3),
-        Constraint::Fill(1),
-        Constraint::Fill(1),
-    ])
-    .areas(form_area);
-
-    for (field, area) in Field::ALL.into_iter().zip(field_areas) {
-        let title = format!(" {} ", field.title());
-        let input = Paragraph::new(app.draft.get(field))
-            .block(pane(title, app.focus == Focus::Field(field)));
-        f.render_widget(input, area);
+        match self.mode {
+            Mode::Normal => return self.normal_key(key.code),
+            Mode::Insert => self.insert_key(key.code),
+        }
+        None
     }
-}
 
-/// A bordered box, green when focused and gray otherwise.
-fn pane<'a>(title: impl Into<Line<'a>>, focused: bool) -> Block<'a> {
-    let color = if focused {
-        Color::Green
-    } else {
-        Color::DarkGray
-    };
-    Block::bordered().title(title).style(Style::new().fg(color))
+    fn normal_key(&mut self, code: KeyCode) -> Option<Exit> {
+        match (code, self.focus) {
+            (KeyCode::Char('q'), _) => return Some(Exit::Abort),
+            (KeyCode::Char('i'), _) => self.mode = Mode::Insert,
+
+            (KeyCode::Char('h'), _) => self.focus = Focus::Diff,
+            (KeyCode::Char('l'), _) => self.focus = Focus::Field(Field::Type),
+
+            (KeyCode::Char('j') | KeyCode::Down, Focus::Diff) => {
+                self.diff_scroll = self.diff_scroll.saturating_add(1);
+            }
+            (KeyCode::Char('k') | KeyCode::Up, Focus::Diff) => {
+                self.diff_scroll = self.diff_scroll.saturating_sub(1);
+            }
+            (KeyCode::Char('j') | KeyCode::Down, Focus::Field(f)) => {
+                self.focus = Focus::Field(f.next());
+            }
+            (KeyCode::Char('k') | KeyCode::Up, Focus::Field(f)) => {
+                self.focus = Focus::Field(f.prev());
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn insert_key(&mut self, code: KeyCode) {
+        // You can't type into the diff pane; Esc still leaves Insert.
+        let Focus::Field(field) = self.focus else {
+            if code == KeyCode::Esc {
+                self.mode = Mode::Normal;
+            }
+            return;
+        };
+        let buf = self.draft.get_mut(field);
+
+        match code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Char(c) => buf.push(c),
+            KeyCode::Backspace => {
+                buf.pop();
+            }
+            KeyCode::Enter if field.is_multiline() => buf.push('\n'),
+            _ => {}
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rendering
+    // -----------------------------------------------------------------------
+
+    fn draw(&self, frame: &mut Frame) {
+        let [diff_area, form_area] =
+            Layout::horizontal([Constraint::Percentage(50); 2]).areas(frame.area());
+
+        let diff = Paragraph::new(self.diff.as_str())
+            .block(self.pane(" Diff (@) ", Focus::Diff))
+            .scroll((self.diff_scroll, 0));
+        frame.render_widget(diff, diff_area);
+
+        let field_areas: [Rect; 5] = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+        ])
+        .areas(form_area);
+
+        for (field, area) in Field::ALL.into_iter().zip(field_areas) {
+            let title = format!(" {} ", field.title());
+            let input =
+                Paragraph::new(self.draft.get(field)).block(self.pane(title, Focus::Field(field)));
+            frame.render_widget(input, area);
+        }
+    }
+
+    /// A bordered box, green when `target` has focus and gray otherwise.
+    fn pane<'a>(&self, title: impl Into<Line<'a>>, target: Focus) -> Block<'a> {
+        let color = if self.focus == target {
+            Color::Green
+        } else {
+            Color::DarkGray
+        };
+        Block::bordered().title(title).style(Style::new().fg(color))
+    }
 }
 
 #[cfg(test)]
