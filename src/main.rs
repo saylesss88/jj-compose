@@ -204,6 +204,8 @@ struct App {
     diff_height: u16,
     draft: Draft,
     focus: Focus,
+    /// Form field to return to when leaving the diff pane.
+    last_field: Field,
     mode: Mode,
     /// Shown in the status bar until the next key press
     error: Option<&'static str>,
@@ -219,6 +221,7 @@ impl App {
             diff_height: 0,
             draft: Draft::default(),
             focus: Focus::Field(Field::Type),
+            last_field: Field::Type,
             mode: Mode::Normal,
             error: None,
         }
@@ -245,33 +248,49 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Exit> {
         self.error = None;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if ctrl && key.code == KeyCode::Char('s') {
-            return self.submit();
+        // Global bindings, active in both modes.
+        match key.code {
+            KeyCode::Char('s') if ctrl => return self.submit(),
+            KeyCode::Char('c') if ctrl => return Some(Exit::Abort),
+            KeyCode::Tab => {
+                self.focus_field(self.current_field().next());
+                return None;
+            }
+            KeyCode::BackTab => {
+                self.focus_field(self.current_field().prev());
+                return None;
+            }
+            _ => {}
         }
 
         match self.mode {
-            Mode::Normal => return self.normal_key(key.code),
+            Mode::Normal => return self.normal_key(key.code, ctrl),
             Mode::Insert => self.insert_key(key.code, ctrl),
         }
         None
     }
 
-    fn normal_key(&mut self, code: KeyCode) -> Option<Exit> {
+    fn normal_key(&mut self, code: KeyCode, ctrl: bool) -> Option<Exit> {
         match (code, self.focus) {
             (KeyCode::Char('q'), _) => return Some(Exit::Abort),
-            (KeyCode::Char('i'), _) => self.mode = Mode::Insert,
 
-            (KeyCode::Char('h'), _) => self.focus = Focus::Diff,
-            (KeyCode::Char('l'), _) => self.focus = Focus::Field(Field::Type),
+            (KeyCode::Char('i' | 'a') | KeyCode::Enter, Focus::Field(_)) => {
+                self.mode = Mode::Insert;
+            }
+
+            (KeyCode::Char('h') | KeyCode::Left, _) => self.focus = Focus::Diff,
+            (KeyCode::Char('l') | KeyCode::Right, _) => self.focus_field(self.last_field),
 
             (KeyCode::Char('j') | KeyCode::Down, Focus::Diff) => self.scroll_down(1),
             (KeyCode::Char('k') | KeyCode::Up, Focus::Diff) => self.scroll_up(1),
-            (KeyCode::Char('j') | KeyCode::Down, Focus::Field(f)) => {
-                self.focus = Focus::Field(f.next());
-            }
-            (KeyCode::Char('k') | KeyCode::Up, Focus::Field(f)) => {
-                self.focus = Focus::Field(f.prev());
-            }
+            (KeyCode::Char('j') | KeyCode::Down, Focus::Field(f)) => self.focus_field(f.next()),
+            (KeyCode::Char('k') | KeyCode::Up, Focus::Field(f)) => self.focus_field(f.prev()),
+
+            // Diff scrolling works from anywhere so you can read while writing.
+            (KeyCode::Char('d'), _) if ctrl => self.scroll_down(self.diff_height / 2),
+            (KeyCode::Char('u'), _) if ctrl => self.scroll_up(self.diff_height / 2),
+            (KeyCode::Char('g'), _) => self.diff_scroll = 0,
+            (KeyCode::Char('G'), _) => self.diff_scroll = self.max_scroll(),
             _ => {}
         }
         None
@@ -308,6 +327,19 @@ impl App {
                 None
             }
         }
+    }
+
+    /// The field that Tab moves from, or that `l` returns to.
+    fn current_field(&self) -> Field {
+        match self.focus {
+            Focus::Field(f) => f,
+            Focus::Diff => self.last_field,
+        }
+    }
+
+    fn focus_field(&mut self, field: Field) {
+        self.focus = Focus::Field(field);
+        self.last_field = field;
     }
 
     /// The last scroll offset that still fills the pane.
@@ -413,11 +445,11 @@ impl App {
         let (mode, keys) = match self.mode {
             Mode::Normal => (
                 Span::raw(" NORMAL ").black().on_green(),
-                " i edit · j/k move/scroll · h/l diff/form · ^s commit · q quit",
+                " i edit · j/k move · h/l diff/form · ^d/^u g/G scroll · Tab next · ^s commit · q quit",
             ),
             Mode::Insert => (
                 Span::raw(" INSERT ").black().on_yellow(),
-                " Esc normal · Enter newline · ^s commit",
+                " Esc normal · Tab next field · Enter newline/next · ^s commit",
             ),
         };
         Line::from(vec![mode, Span::raw(keys).dark_gray()])
