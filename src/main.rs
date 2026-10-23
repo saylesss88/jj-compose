@@ -129,8 +129,26 @@ impl Draft {
         }
     }
 
-    /// The header plus the optional Problem/Solution body.
-    fn build(&self) -> String {
+    /// The header plus the optional Problem/Solution body, or the first
+    /// reason the header isn't a valid Conventional Commit
+    fn build(&self) -> Result<String, &'static str> {
+        let ty = self.get(Field::Type).trim();
+        if ty.is_empty() {
+            return Err("type is required (feat, fix, refactor, ...)");
+        }
+        if !ty.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err("type must be a single word, e.g. feat or fix");
+        }
+
+        let scope = self.get(Field::Scope).trim();
+        if scope.contains(|c: char| c.is_whitespace() || c == '(' || c == ')') {
+            return Err("scope must not contain spaces or parentheses");
+        }
+
+        if self.get(Field::Subject).trim().is_empty() {
+            return Err("subject is required");
+        }
+
         let mut message = self.header();
         for field in [Field::Problem, Field::Solution] {
             let body = self.get(field).trim();
@@ -141,7 +159,7 @@ impl Draft {
                 message.push_str(body);
             }
         }
-        message
+        Ok(message)
     }
 }
 
@@ -178,6 +196,8 @@ struct App {
     draft: Draft,
     focus: Focus,
     mode: Mode,
+    /// Shown in the status bar until the next key press
+    error: Option<&'static str>,
 }
 
 impl App {
@@ -191,6 +211,7 @@ impl App {
             draft: Draft::default(),
             focus: Focus::Field(Field::Type),
             mode: Mode::Normal,
+            error: None,
         }
     }
     /// Returns the finished commit message, or `None` if the user quit.
@@ -213,9 +234,10 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<Exit> {
+        self.error = None;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('s') {
-            return Some(Exit::Commit(self.draft.build()));
+            return self.submit();
         }
 
         match self.mode {
@@ -265,6 +287,17 @@ impl App {
             }
             KeyCode::Enter if field.is_multiline() => buf.push('\n'),
             _ => {}
+        }
+    }
+
+    /// Finish with a valid message, or stay open and show why not.
+    fn submit(&mut self) -> Option<Exit> {
+        match self.draft.build() {
+            Ok(message) => Some(Exit::Commit(message)),
+            Err(e) => {
+                self.error = Some(e);
+                None
+            }
         }
     }
 
@@ -343,6 +376,9 @@ impl App {
 
     /// Bottom row: the current mode and the keys that work in it.
     fn status_line(&self) -> Line<'static> {
+        if let Some(err) = self.error {
+            return Line::from(format!(" ✗ {err}")).red().bold();
+        }
         let (mode, keys) = match self.mode {
             Mode::Normal => (
                 Span::raw(" NORMAL ").black().on_green(),
@@ -389,16 +425,30 @@ mod tests {
 
     #[test]
     fn formats_header_and_body() {
-        let d = draft(" feat ", "ui", "add diff pane", "No context.\n", "");
+        let d = draft(
+            " feat ",
+            "ui",
+            "add diff pane",
+            "No context.\n",
+            "Show `jj diff`.",
+        );
         assert_eq!(
-            d.build(),
-            "feat(ui): add diff pane\n\nProblem:\nNo context."
+            d.build().unwrap(),
+            "feat(ui): add diff pane\n\nProblem:\nNo context.\n\nSolution:\nShow `jj diff`."
         );
     }
 
     #[test]
     fn omits_empty_scope() {
         let d = draft("fix", "", "handle empty repo", "", "");
-        assert_eq!(d.build(), "fix: handle empty repo");
+        assert_eq!(d.build().unwrap(), "fix: handle empty repo");
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        assert!(draft("", "", "x", "", "").build().is_err());
+        assert!(draft("feat", "", " ", "", "").build().is_err());
+        assert!(draft("new feature", "", "x", "", "").build().is_err());
+        assert!(draft("feat", "a b", "x", "", "").build().is_err());
     }
 }
