@@ -9,6 +9,11 @@ use ratatui::{
     widgets::{Block, Paragraph},
 };
 
+/// Header length (`type(scope): subject`) most style guides aim for.
+const HEADER_SOFT_LIMIT: usize = 50;
+/// Header length past which forges and `git log --oneline` start truncating.
+const HEADER_HARD_LIMIT: usize = 72;
+
 fn main() -> Result<(), Box<dyn Error>> {
     // Fail before touching the terminal: if we can't diff, we can't describe either.
     let diff = load_diff()?;
@@ -123,10 +128,6 @@ impl Draft {
         let (ty, bang) = ty
             .strip_suffix('!')
             .map_or((ty, ""), |ty| (ty.trim_end(), "!"));
-        // let (ty, bang) = match ty.strip_suffix('!') {
-        //     Some(ty) => (ty.trim_end(), "!"),
-        //     None => (ty, ""),
-        // };
         let scope = self.get(Field::Scope).trim();
         let subject = self.get(Field::Subject).trim();
 
@@ -354,9 +355,9 @@ impl App {
         .areas(form_area);
 
         for (field, area) in Field::ALL.into_iter().zip(field_areas) {
-            let title = format!(" {} ", field.title());
             let text = self.draft.get(field);
-            let input = Paragraph::new(text).block(self.pane(title, Focus::Field(field)));
+            let input =
+                Paragraph::new(text).block(self.pane(self.field_title(field), Focus::Field(field)));
             frame.render_widget(input, area);
 
             // ratatui hides the cursor unless a frame places it.
@@ -380,6 +381,28 @@ impl App {
             .title(title)
             .border_style(style)
             .title_style(style)
+    }
+
+    /// The Subject title shows a live length counter for the whole header line.
+    fn field_title(&self, field: Field) -> Line<'static> {
+        let title = format!(" {} ", field.title());
+        if field != Field::Subject {
+            return Line::from(title);
+        }
+
+        let len = self.draft.header().chars().count();
+        let color = match len {
+            0..=HEADER_SOFT_LIMIT => Color::Green,
+            n if n <= HEADER_HARD_LIMIT => Color::Yellow,
+            _ => Color::Red,
+        };
+        Line::from(vec![
+            Span::raw(title),
+            Span::styled(
+                format!("{len}/{HEADER_HARD_LIMIT} "),
+                Style::new().fg(color),
+            ),
+        ])
     }
 
     /// Bottom row: the current mode and the keys that work in it.
