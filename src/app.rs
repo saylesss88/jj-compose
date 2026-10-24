@@ -349,16 +349,21 @@ impl App {
     }
 
     fn draw_form(&mut self, frame: &mut Frame, area: Rect) {
-        let [top, subject, problem, solution] = Layout::vertical([
+        // Trailers are usually a line or two; give the room to the prose.
+        let trailer_rows = self.fields[Field::Trailers as usize].lines().len();
+        let trailer_height = u16::try_from(trailer_rows.clamp(1, 4)).unwrap_or(4) + 2;
+        let [top, subject, body, problem, solution, trailers] = Layout::vertical([
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Fill(1),
             Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Length(trailer_height),
         ])
         .areas(area);
         let [ty, scope] =
             Layout::horizontal([Constraint::Percentage(40), Constraint::Fill(1)]).areas(top);
-        let areas = [ty, scope, subject, problem, solution];
+        let areas = [ty, scope, subject, body, problem, solution, trailers];
 
         let header_len = self.draft().header().chars().count();
         let accent = self.accent();

@@ -1,28 +1,54 @@
-//! The commit message model: one text buffer per form field, rendered to a
-//! Conventional Commit message.
+//! The commit message model: one text buffer per form field, rendered to
+//! (and parsed from) a Conventional Commit message:
+//!
+//! ```text
+//! type(scope)!: subject
+//!
+//! Free-form body text.
+//!
+//! Problem:
+//! ...
+//!
+//! Solution:
+//! ...
+//!
+//! Token: value
+//! Token #value
+//! ```
+//!
+//! Every part after the header is optional. Parsing is deliberately
+//! conservative: a message is only split into fields if rendering those
+//! fields reproduces it byte for byte, so opening and saving a message
+//! never rewrites it behind the user's back.
+
+use std::fmt;
 
 /// Header length (`type(scope): subject`) most style guides aim for.
 pub const HEADER_SOFT_LIMIT: usize = 50;
 /// Header length past which forges and `git log --oneline` start truncating.
 pub const HEADER_HARD_LIMIT: usize = 72;
 
-/// One input box in the form, in on-screen order
+/// One input box in the form, in on-screen (and message) order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Type,
     Scope,
     Subject,
+    Body,
     Problem,
     Solution,
+    Trailers,
 }
 
 impl Field {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Type,
         Self::Scope,
         Self::Subject,
+        Self::Body,
         Self::Problem,
         Self::Solution,
+        Self::Trailers,
     ];
 
     pub const fn title(self) -> &'static str {
@@ -30,8 +56,10 @@ impl Field {
             Self::Type => "Type",
             Self::Scope => "Scope",
             Self::Subject => "Subject",
+            Self::Body => "Body",
             Self::Problem => "Problem",
             Self::Solution => "Solution",
+            Self::Trailers => "Trailers",
         }
     }
 
@@ -41,13 +69,24 @@ impl Field {
             Self::Type => "feat, fix, docs, refactor, …",
             Self::Scope => "optional",
             Self::Subject => "imperative summary, no period",
+            Self::Body => "Free-form context (optional)",
             Self::Problem => "What is wrong or missing? (optional)",
             Self::Solution => "How does this change address it? (optional)",
+            Self::Trailers => "Fixes #42, Reviewed-by: Name <email> (optional)",
         }
     }
 
     pub const fn is_multiline(self) -> bool {
-        matches!(self, Self::Problem | Self::Solution)
+        !matches!(self, Self::Type | Self::Scope | Self::Subject)
+    }
+
+    /// The section heading this field is written under, if any.
+    const fn heading(self) -> Option<&'static str> {
+        match self {
+            Self::Problem => Some("Problem:"),
+            Self::Solution => Some("Solution:"),
+            _ => None,
+        }
     }
 
     /// The field below this one (stays put on the last field).
@@ -61,8 +100,30 @@ impl Field {
     }
 }
 
-/// The text the user has typed so far, one buffer per [`Field`].
-#[derive(Debug, Default)]
+/// Why a message couldn't be split into fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseError {
+    /// The first line isn't `type(scope)!: subject`.
+    Header,
+    /// The header and body aren't separated by a blank line.
+    NoBlankLine,
+    /// The fields can't reproduce the message exactly (unusual spacing,
+    /// sections out of order, ...).
+    NotLossless,
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Header => "the first line isn't `type(scope): subject`",
+            Self::NoBlankLine => "there's no blank line after the first line",
+            Self::NotLossless => "the form can't reproduce its exact layout",
+        })
+    }
+}
+
+/// The text of each field.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Draft {
     inputs: [String; Field::ALL.len()],
 }
@@ -72,8 +133,8 @@ impl Draft {
         &self.inputs[field as usize]
     }
 
-    pub fn set(&mut self, field: Field, value: String) {
-        self.inputs[field as usize] = value;
+    pub fn set(&mut self, field: Field, value: impl Into<String>) {
+        self.inputs[field as usize] = value.into();
     }
 
     /// True if every field is empty.
@@ -98,8 +159,8 @@ impl Draft {
         }
     }
 
-    /// The header plus the optional Problem/Solution body, or the first
-    /// reason the header isn't a valid Conventional Commit
+    /// The rendered message, or the first reason it isn't a valid
+    /// Conventional Commit.
     pub fn build(&self) -> Result<String, &'static str> {
         let ty = self.get(Field::Type).trim();
         // Only one `!` is meaningful; `header()` strips exactly one.
@@ -107,7 +168,7 @@ impl Draft {
         if ty.is_empty() {
             return Err("type is required (feat, fix, refactor, ...)");
         }
-        if !ty.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        if !is_token(ty) {
             return Err("type must be a single word, e.g. feat or fix");
         }
 
@@ -120,55 +181,193 @@ impl Draft {
             return Err("subject is required");
         }
 
+        let trailers = tidy(self.get(Field::Trailers));
+        if !trailers.is_empty() && !is_trailer_block(trailers) {
+            return Err("each trailer must look like `Token: value` or `Token #value`");
+        }
+
         Ok(self.render())
     }
 
     /// The message as it would be written, without validating it. An
     /// all-empty draft renders as an empty string.
     pub fn render(&self) -> String {
-        let mut message = if self.is_empty() {
-            String::new()
-        } else {
-            self.header()
-        };
-        for field in [Field::Problem, Field::Solution] {
-            let body = self.get(field).trim();
-            if !body.is_empty() {
-                message.push_str("\n\n");
-                message.push_str(field.title());
-                message.push_str(":\n");
-                message.push_str(body);
-            }
+        let mut parts = Vec::new();
+        if !self.is_empty() {
+            parts.push(self.header());
         }
-        message
+        for field in [
+            Field::Body,
+            Field::Problem,
+            Field::Solution,
+            Field::Trailers,
+        ] {
+            let text = tidy(self.get(field));
+            if text.is_empty() {
+                continue;
+            }
+            parts.push(match field.heading() {
+                Some(heading) => format!("{heading}\n{text}"),
+                None => text.to_owned(),
+            });
+        }
+        parts.join("\n\n")
     }
+
+    /// Split an existing message into fields, if that can be done without
+    /// changing it: `parse(m)?.render()` is always `m` minus trailing
+    /// whitespace.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used once descriptions are loaded")
+    )]
+    pub fn parse(message: &str) -> Result<Self, ParseError> {
+        let message = message.trim_end();
+        let mut draft = Self::default();
+        if message.is_empty() {
+            return Ok(draft);
+        }
+
+        let (header, rest) = message.split_once('\n').unwrap_or((message, ""));
+        let (ty, scope, subject) = parse_header(header).ok_or(ParseError::Header)?;
+        draft.set(Field::Type, ty);
+        draft.set(Field::Scope, scope);
+        draft.set(Field::Subject, subject);
+
+        let body = match rest.strip_prefix('\n') {
+            Some(body) => body,
+            None if rest.is_empty() => "",
+            None => return Err(ParseError::NoBlankLine),
+        };
+
+        // Trailers: the last paragraph, if it's made only of trailer lines.
+        let (body, trailers) = match body.rsplit_once("\n\n") {
+            Some((before, last)) if is_trailer_block(last) => (before, last),
+            None if is_trailer_block(body) => ("", body),
+            _ => (body, ""),
+        };
+        draft.set(Field::Trailers, trailers);
+
+        // Sections: a heading line at the start of a paragraph.
+        let lines: Vec<&str> = body.lines().collect();
+        let is_heading =
+            |i: usize, heading: &str| lines[i] == heading && (i == 0 || lines[i - 1].is_empty());
+        let problem = (0..lines.len()).find(|&i| is_heading(i, "Problem:"));
+        let solution =
+            (problem.map_or(0, |p| p + 1)..lines.len()).find(|&i| is_heading(i, "Solution:"));
+
+        // Text between `from` and the next heading (exclusive), without the
+        // blank line that separates them.
+        let span = |from: usize, to: Option<usize>| {
+            let to = to.map_or(lines.len(), |to| to.saturating_sub(1));
+            lines.get(from..to).unwrap_or_default().join("\n")
+        };
+        draft.set(Field::Body, span(0, problem.or(solution)));
+        if let Some(p) = problem {
+            draft.set(Field::Problem, span(p + 1, solution));
+        }
+        if let Some(s) = solution {
+            draft.set(Field::Solution, span(s + 1, None));
+        }
+
+        if draft.render() == message {
+            Ok(draft)
+        } else {
+            Err(ParseError::NotLossless)
+        }
+    }
+}
+
+/// A field's text as written into the message: no leading blank lines, no
+/// trailing whitespace. Leading indentation on the first line is kept.
+fn tidy(text: &str) -> &str {
+    let text = text.trim_end();
+    let start = text
+        .split_inclusive('\n')
+        .take_while(|line| line.trim().is_empty())
+        .map(str::len)
+        .sum();
+    &text[start..]
+}
+
+/// A Conventional Commit type or trailer token: letters, digits, `-`.
+fn is_token(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Split `type(scope)!: subject` into the Type field (which keeps the `!`),
+/// the scope and the subject.
+fn parse_header(header: &str) -> Option<(String, &str, &str)> {
+    let (prefix, subject) = header.split_once(": ")?;
+    let (prefix, bang) = prefix.strip_suffix('!').map_or((prefix, ""), |p| (p, "!"));
+    let (ty, scope) = match prefix.strip_suffix(')') {
+        Some(p) => p.split_once('(')?,
+        None => (prefix, ""),
+    };
+    let scope_ok = !scope.contains(|c: char| c.is_whitespace() || c == '(' || c == ')');
+    (is_token(ty) && scope_ok && !subject.trim().is_empty())
+        .then(|| (format!("{ty}{bang}"), scope, subject))
+}
+
+/// A paragraph of git trailers / Conventional Commit footers: every line is
+/// `Token: value` or `Token #value`, or an indented continuation line.
+fn is_trailer_block(paragraph: &str) -> bool {
+    let mut lines = paragraph.lines();
+    lines.next().is_some_and(is_trailer)
+        && lines.all(|line| is_trailer(line) || line.starts_with([' ', '\t']))
+}
+
+fn is_trailer(line: &str) -> bool {
+    let rest = line
+        .strip_prefix("BREAKING CHANGE")
+        .or_else(|| {
+            let end = line.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))?;
+            is_token(&line[..end]).then(|| &line[end..])
+        })
+        .unwrap_or_default();
+    rest.strip_prefix(": ")
+        .or_else(|| rest.strip_prefix(" #"))
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn draft(ty: &str, scope: &str, subject: &str, problem: &str, solution: &str) -> Draft {
-        Draft {
-            inputs: [ty, scope, subject, problem, solution].map(str::to_owned),
+    fn draft(fields: &[(Field, &str)]) -> Draft {
+        let mut d = Draft::default();
+        for &(field, text) in fields {
+            d.set(field, text);
         }
+        d
+    }
+
+    fn header(ty: &str, scope: &str, subject: &str) -> Draft {
+        draft(&[
+            (Field::Type, ty),
+            (Field::Scope, scope),
+            (Field::Subject, subject),
+        ])
+    }
+
+    /// Parses, and checks that rendering gives the message back.
+    fn round_trip(message: &str) -> Draft {
+        let d = Draft::parse(message).unwrap_or_else(|e| panic!("{e}: {message:?}"));
+        assert_eq!(d.render(), message.trim_end());
+        d
     }
 
     #[test]
     fn header_only() {
-        let d = draft("fix", "", "handle empty repo", "", "");
+        let d = header("fix", "", "handle empty repo");
         assert_eq!(d.build().unwrap(), "fix: handle empty repo");
     }
 
     #[test]
     fn full_message() {
-        let d = draft(
-            " feat ",
-            "ui",
-            "add diff pane",
-            "No context.\n",
-            "Show `jj diff`.",
-        );
+        let mut d = header(" feat ", "ui", "add diff pane");
+        d.set(Field::Problem, "No context.\n");
+        d.set(Field::Solution, "Show `jj diff`.");
         assert_eq!(
             d.build().unwrap(),
             "feat(ui): add diff pane\n\nProblem:\nNo context.\n\nSolution:\nShow `jj diff`."
@@ -177,17 +376,119 @@ mod tests {
 
     #[test]
     fn breaking_change_bang_goes_after_scope() {
-        let d = draft("feat!", "api", "drop v1 endpoints", "", "");
+        let d = header("feat!", "api", "drop v1 endpoints");
         assert_eq!(d.build().unwrap(), "feat(api)!: drop v1 endpoints");
     }
 
     #[test]
     fn rejects_bad_input() {
-        assert!(draft("", "", "x", "", "").build().is_err());
-        assert!(draft("feat", "", " ", "", "").build().is_err());
-        assert!(draft("new feature", "", "x", "", "").build().is_err());
-        assert!(draft("feat", "a b", "x", "", "").build().is_err());
-        assert!(draft("feat!!", "", "x", "", "").build().is_err());
-        assert!(draft("!", "", "x", "", "").build().is_err());
+        assert!(header("", "", "x").build().is_err());
+        assert!(header("feat", "", " ").build().is_err());
+        assert!(header("new feature", "", "x").build().is_err());
+        assert!(header("feat", "a b", "x").build().is_err());
+        assert!(header("feat!!", "", "x").build().is_err());
+        assert!(header("!", "", "x").build().is_err());
+
+        let mut d = header("fix", "", "x");
+        d.set(Field::Trailers, "fixes the bug");
+        assert!(d.build().is_err());
+    }
+
+    #[test]
+    fn empty_draft_renders_empty() {
+        assert_eq!(Draft::default().render(), "");
+        assert_eq!(Draft::parse("\n").unwrap(), Draft::default());
+    }
+
+    #[test]
+    fn keeps_first_line_indentation() {
+        let mut d = header("docs", "", "add example");
+        d.set(Field::Body, "\n\n    let x = 1;\nmore\n\n");
+        assert_eq!(d.render(), "docs: add example\n\n    let x = 1;\nmore");
+    }
+
+    #[test]
+    fn parses_unknown_body_and_trailers() {
+        let d = round_trip(
+            "fix(parser): handle empty input\n\n\
+             This also corrects an unrelated diagnostic.\n\n\
+             Fixes #42\n\
+             Reviewed-by: Someone\n",
+        );
+        assert_eq!(d.get(Field::Type), "fix");
+        assert_eq!(d.get(Field::Scope), "parser");
+        assert_eq!(d.get(Field::Subject), "handle empty input");
+        assert_eq!(
+            d.get(Field::Body),
+            "This also corrects an unrelated diagnostic."
+        );
+        assert_eq!(d.get(Field::Trailers), "Fixes #42\nReviewed-by: Someone");
+    }
+
+    #[test]
+    fn parses_sections() {
+        let d = round_trip(
+            "feat(ui)!: add diff pane\n\n\
+             Context first.\n\n\
+             Problem:\nNo context.\n\nSecond paragraph.\n\n\
+             Solution:\nShow `jj diff`.\n\n\
+             BREAKING CHANGE: the old pane is gone",
+        );
+        assert_eq!(d.get(Field::Type), "feat!");
+        assert_eq!(d.get(Field::Body), "Context first.");
+        assert_eq!(d.get(Field::Problem), "No context.\n\nSecond paragraph.");
+        assert_eq!(d.get(Field::Solution), "Show `jj diff`.");
+        assert_eq!(
+            d.get(Field::Trailers),
+            "BREAKING CHANGE: the old pane is gone"
+        );
+    }
+
+    #[test]
+    fn parses_trailers_without_body() {
+        let d = round_trip("fix: x\n\nSigned-off-by: A <a@example.com>\n  continued");
+        assert_eq!(d.get(Field::Body), "");
+        assert!(d.get(Field::Trailers).starts_with("Signed-off-by"));
+    }
+
+    #[test]
+    fn solution_without_problem() {
+        let d = round_trip("fix: x\n\nSolution:\nDo it.");
+        assert_eq!(d.get(Field::Solution), "Do it.");
+    }
+
+    #[test]
+    fn heading_mid_paragraph_is_body_text() {
+        let d = round_trip("fix: x\n\nSee below\nProblem:\nnot a heading");
+        assert_eq!(d.get(Field::Problem), "");
+    }
+
+    #[test]
+    fn rejects_what_it_cannot_reproduce() {
+        let cases = [
+            ("WIP", ParseError::Header),
+            ("fix(a b): x", ParseError::Header),
+            ("fix:  x", ParseError::NotLossless),
+            ("fix: x\nbody", ParseError::NoBlankLine),
+            ("fix: x\n\n\nbody", ParseError::NotLossless),
+            ("fix: x\n\n  \nbody", ParseError::NotLossless),
+            (
+                "fix: x\n\nProblem:\n\nSolution:\ny",
+                ParseError::NotLossless,
+            ),
+        ];
+        for (message, error) in cases {
+            assert_eq!(Draft::parse(message), Err(error), "{message:?}");
+        }
+    }
+
+    #[test]
+    fn trailer_lines() {
+        assert!(is_trailer("Fixes #42"));
+        assert!(is_trailer("Reviewed-by: Someone"));
+        assert!(is_trailer("BREAKING CHANGE: gone"));
+        assert!(!is_trailer("Fixes 42"));
+        assert!(!is_trailer("Two words: no"));
+        assert!(!is_trailer("Token:"));
     }
 }
