@@ -7,7 +7,7 @@ use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::Block,
 };
 use ratatui_textarea::{CursorMove, Input, TextArea, WrapMode};
@@ -99,7 +99,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(diff: Text<'static>, session: Session) -> Self {
+    #[must_use]
+    pub fn new(diff: DiffView, session: Session) -> Self {
         let original = session.description.trim_end().to_owned();
 
         // Open the form only if it can represent the description exactly;
@@ -123,7 +124,7 @@ impl App {
         };
 
         Self {
-            diff: DiffView::new(diff),
+            diff,
             change_id: session.change_id,
             fields: Field::ALL.map(|field| field_editor(field, draft.get(field))),
             field: Field::Type,
@@ -139,6 +140,10 @@ impl App {
     }
 
     /// Runs until the user commits or quits.
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if drawing the UI frame to the terminal fails, or
+    /// if reading the underlying terminal events (such as keystrokes) fails.
     pub fn run(mut self, terminal: &mut DefaultTerminal) -> io::Result<Exit> {
         loop {
             terminal.draw(|frame| self.draw(frame))?;
@@ -688,7 +693,7 @@ mod tests {
 
     fn app(description: &str, keymap: Keymap) -> App {
         App::new(
-            Text::raw("diff"),
+            DiffView::from_output(b"", "diff").unwrap(),
             Session {
                 description: description.into(),
                 change_id: "abc".into(),

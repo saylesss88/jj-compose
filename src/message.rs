@@ -51,6 +51,7 @@ impl Field {
         Self::Trailers,
     ];
 
+    #[must_use]
     pub const fn title(self) -> &'static str {
         match self {
             Self::Type => "Type",
@@ -64,6 +65,7 @@ impl Field {
     }
 
     /// Hint shown in an empty field.
+    #[must_use]
     pub const fn placeholder(self) -> &'static str {
         match self {
             Self::Type => "feat, fix, docs, refactor, …",
@@ -76,6 +78,7 @@ impl Field {
         }
     }
 
+    #[must_use]
     pub const fn is_multiline(self) -> bool {
         !matches!(self, Self::Type | Self::Scope | Self::Subject)
     }
@@ -90,11 +93,13 @@ impl Field {
     }
 
     /// The field below this one (stays put on the last field).
+    #[must_use]
     pub fn next(self) -> Self {
         Self::ALL[(self as usize + 1).min(Self::ALL.len() - 1)]
     }
 
     /// The field above this one (stays put on the first field).
+    #[must_use]
     pub const fn prev(self) -> Self {
         Self::ALL[(self as usize).saturating_sub(1)]
     }
@@ -129,6 +134,7 @@ pub struct Draft {
 }
 
 impl Draft {
+    #[must_use]
     pub fn get(&self, field: Field) -> &str {
         &self.inputs[field as usize]
     }
@@ -138,12 +144,14 @@ impl Draft {
     }
 
     /// True if every field is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.inputs.iter().all(|s| s.trim().is_empty())
     }
 
     /// `type(scope)!: subject`. A trailing `!` on the type marks a breaking
     /// change and is moved after the scope, per the Conventional Commits spec.
+    #[must_use]
     pub fn header(&self) -> String {
         let ty = self.get(Field::Type).trim();
         let (ty, bang) = ty
@@ -161,6 +169,14 @@ impl Draft {
 
     /// The rendered message, or the first reason it isn't a valid
     /// Conventional Commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a static string describing the validation failure if:
+    /// * The commit type is empty or contains multiple words/invalid characters.
+    /// * The scope contains whitespace or parentheses.
+    /// * The subject line is empty.
+    /// * The trailers section contains text that does not conform to standard trailer formatting (e.g., `Token: value` or `Token #value`).
     pub fn build(&self) -> Result<String, &'static str> {
         let ty = self.get(Field::Type).trim();
         // Only one `!` is meaningful; `header()` strips exactly one.
@@ -191,6 +207,7 @@ impl Draft {
 
     /// The message as it would be written, without validating it. An
     /// all-empty draft renders as an empty string.
+    #[must_use]
     pub fn render(&self) -> String {
         let mut parts = Vec::new();
         if !self.is_empty() {
@@ -218,6 +235,13 @@ impl Draft {
     /// Split an existing message into fields, if that can be done without
     /// changing it: `parse(m)?.render()` is always `m` minus trailing
     /// whitespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ParseError`] if the message cannot be safely parsed:
+    /// * [`ParseError::Header`]: The first line does not conform to the `type(scope): subject` format.
+    /// * [`ParseError::NoBlankLine`]: A body is present, but it is not separated from the header by a blank line.
+    /// * [`ParseError::NotLossless`]: The parsed representation, when re-rendered, does not match the original input string (meaning data or formatting would be lost).
     pub fn parse(message: &str) -> Result<Self, ParseError> {
         let message = message.trim_end();
         let mut draft = Self::default();

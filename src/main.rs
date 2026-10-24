@@ -4,23 +4,17 @@
 //! See `message` for the message format and how existing descriptions are
 //! parsed without being rewritten.
 
-mod app;
-mod diff;
-mod jj;
-mod message;
-mod vim;
-
 use std::{error::Error, io, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
-
-use app::{App, Exit, Keymap, Session};
-use diff::{DiffFormat, load_diff};
-use jj::Jj;
 use ratatui::crossterm::{
     event::{DisableBracketedPaste, EnableBracketedPaste},
     execute,
 };
+
+use jj_compose::app::{App, Exit, Keymap, Session};
+use jj_compose::diff;
+use jj_compose::jj::Jj;
 
 /// Write a Conventional Commit description for a jj change.
 #[derive(Debug, Parser)]
@@ -37,10 +31,6 @@ struct Args {
     /// Path to the repository (passed to jj as `-R`)
     #[arg(short = 'R', long, value_name = "PATH")]
     repository: Option<PathBuf>,
-
-    /// Show the diff in git format instead of jj's configured format
-    #[arg(long)]
-    git: bool,
 
     /// Key bindings for the editor
     #[arg(long, value_enum, env = "JJ_COMPOSE_KEYMAP", default_value = "default")]
@@ -66,15 +56,11 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     let revset = args.revset.or(args.revision).unwrap_or_else(|| "@".into());
     let jj = Jj::new(args.repository);
 
-    // Fail before touching the terminal: resolve the revision once and use
-    // that exact commit for the diff and for `jj describe`.
+    // Fail before touching the terminal: resolve the revision once. The diff
+    // and description are read from that commit; `jj describe` targets its
+    // change ID, which survives jj snapshotting edits made meanwhile.
     let target = jj.resolve(&revset)?;
-    let format = if args.git {
-        DiffFormat::Git
-    } else {
-        DiffFormat::Jj
-    };
-    let diff = load_diff(&jj, &target, format)?;
+    let diff = diff::load(&jj, &target)?;
     let description = jj.description(&target)?;
     let session = Session {
         description: description.clone(),

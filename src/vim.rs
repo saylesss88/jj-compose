@@ -15,6 +15,7 @@ pub enum Mode {
 }
 
 impl Mode {
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Normal | Self::Operator(_) => " NORMAL ",
@@ -55,6 +56,7 @@ pub struct Vim {
 }
 
 impl Vim {
+    #[must_use]
     pub const fn new(mode: Mode) -> Self {
         Self {
             mode,

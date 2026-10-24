@@ -31,6 +31,7 @@ pub struct Target {
 }
 
 impl Jj {
+    #[must_use]
     pub const fn new(repository: Option<PathBuf>) -> Self {
         Self { repository }
     }
@@ -44,6 +45,12 @@ impl Jj {
     }
 
     /// Run a read-only `jj` command and return its stdout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The `jj` executable cannot be found or spawned.
+    /// * The `jj` command exits with a non-zero status code (the error will contain the command's stderr).
     pub fn output(&self, args: &[&str]) -> Result<Vec<u8>> {
         let output = self
             .command()
@@ -62,6 +69,15 @@ impl Jj {
     }
 
     /// Resolve `revset` to exactly one mutable revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The underlying `jj log` command fails to execute.
+    /// * The stdout from `jj` is not valid UTF-8.
+    /// * The provided `revset` resolves to zero or multiple revisions instead of exactly one.
+    /// * The tab-separated output from `jj log` does not match the expected template structure.
+    /// * The resolved revision is marked as immutable.
     pub fn resolve(&self, revset: &str) -> Result<Target> {
         const TEMPLATE: &str = r#"commit_id ++ "\t" ++ change_id ++ "\t" ++ change_id.shortest(8) ++ "\t" ++ if(immutable, "immutable", "mutable") ++ "\n""#;
         let stdout = self.output(&[
@@ -101,6 +117,12 @@ impl Jj {
     }
 
     /// The current description of `target`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The underlying `jj log` command fails to execute or returns a non-zero status.
+    /// * The stdout returned by `jj` contains invalid UTF-8.
     pub fn description(&self, target: &Target) -> Result<String> {
         let stdout = self.output(&[
             "log",
@@ -118,6 +140,15 @@ impl Jj {
     ///
     /// The message goes over stdin rather than `-m`, so a message starting
     /// with `-` can't be mistaken for a flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The `jj describe` command fails to spawn.
+    /// * The child process's standard input cannot be captured.
+    /// * Writing the commit message to the process's standard input fails.
+    /// * Waiting for the process to complete fails.
+    /// * The `jj describe` command exits with a non-zero status code.
     pub fn describe(&self, target: &Target, message: &str) -> Result<()> {
         let mut child = self
             .command()
