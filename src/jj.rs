@@ -24,6 +24,8 @@ pub struct Jj {
 pub struct Target {
     /// Full commit ID: unambiguous even if the change ID is divergent.
     pub commit_id: String,
+    /// Full change ID: stays the same when the commit is rewritten.
+    pub change: String,
     /// Shortest unique change ID, for display.
     pub change_id: String,
 }
@@ -61,7 +63,7 @@ impl Jj {
 
     /// Resolve `revset` to exactly one mutable revision.
     pub fn resolve(&self, revset: &str) -> Result<Target> {
-        const TEMPLATE: &str = r#"commit_id ++ "\t" ++ change_id.shortest(8) ++ "\t" ++ if(immutable, "immutable", "mutable") ++ "\n""#;
+        const TEMPLATE: &str = r#"commit_id ++ "\t" ++ change_id ++ "\t" ++ change_id.shortest(8) ++ "\t" ++ if(immutable, "immutable", "mutable") ++ "\n""#;
         let stdout = self.output(&[
             "log",
             "--no-graph",
@@ -79,8 +81,8 @@ impl Jj {
         };
 
         let mut parts = line.split('\t');
-        let (Some(commit_id), Some(change_id), Some(mutability)) =
-            (parts.next(), parts.next(), parts.next())
+        let (Some(commit_id), Some(change), Some(change_id), Some(mutability)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
         else {
             return Err(format!("unexpected output from jj log: {line:?}").into());
         };
@@ -93,6 +95,7 @@ impl Jj {
 
         Ok(Target {
             commit_id: commit_id.to_owned(),
+            change: change.to_owned(),
             change_id: change_id.to_owned(),
         })
     }
@@ -118,7 +121,7 @@ impl Jj {
     pub fn describe(&self, target: &Target, message: &str) -> Result<()> {
         let mut child = self
             .command()
-            .args(["describe", &target.commit_id, "--stdin"])
+            .args(["describe", &target.change, "--stdin"])
             .stdin(Stdio::piped())
             .spawn()
             .map_err(|e| format!("failed to run jj: {e}"))?;
