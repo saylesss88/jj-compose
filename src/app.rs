@@ -27,7 +27,28 @@ pub enum Keymap {
     Vim,
 }
 
-/// Where keyboard focus is: the diff pane, or the current form field.
+/// How the message is being edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// One box per part of a Conventional Commit.
+    Structured,
+    /// The exact message text, for anything the form can't represent.
+    Raw,
+}
+
+/// What a session starts from.
+pub struct Session {
+    /// The revision's current description.
+    pub description: String,
+    /// Short change ID, for the diff pane's title.
+    pub change_id: String,
+    pub keymap: Keymap,
+    /// Open the raw editor even if the description fits the form.
+    pub raw: bool,
+}
+
+/// Where keyboard focus is: the diff pane, or the editor (the current form
+/// field, or the raw message).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Diff,
@@ -37,6 +58,7 @@ enum Focus {
 /// A one-shot message for the status bar, cleared by the next key press.
 enum Status {
     Error(String),
+    Info(String),
     /// Quit was requested with unsaved edits; a second quit confirms.
     ConfirmQuit,
 }
@@ -49,6 +71,7 @@ pub enum Exit {
 
 pub struct App {
     diff: Text<'static>,
+    change_id: String,
     diff_len: u16,
     diff_scroll: u16,
     /// Rows visible inside the diff pane, updated on every draw.
@@ -57,6 +80,9 @@ pub struct App {
     fields: [TextArea<'static>; Field::ALL.len()],
     /// The form field being edited, or to return to from the diff pane.
     field: Field,
+    /// The whole message, used in [`View::Raw`].
+    raw: TextArea<'static>,
+    view: View,
     focus: Focus,
     /// The message the session started with, to detect unsaved edits.
     original: String,
@@ -67,20 +93,45 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(diff: Text<'static>, keymap: Keymap) -> Self {
+    pub fn new(diff: Text<'static>, session: Session) -> Self {
         let diff_len = u16::try_from(diff.lines.len()).unwrap_or(u16::MAX);
+        let original = session.description.trim_end().to_owned();
+
+        // Open the form only if it can represent the description exactly;
+        // otherwise show the text as-is rather than guess.
+        let (draft, view, status) = match Draft::parse(&original) {
+            Ok(draft) if !session.raw => (draft, View::Structured, None),
+            Ok(draft) => (draft, View::Raw, None),
+            Err(e) => (
+                Draft::default(),
+                View::Raw,
+                Some(Status::Info(format!(
+                    "Opened as raw text because {e}. ^t switches to the form."
+                ))),
+            ),
+        };
+        // Vim starts in Insert for a new message, Normal for a revision.
+        let mode = if original.is_empty() {
+            vim::Mode::Insert
+        } else {
+            vim::Mode::Normal
+        };
+
         Self {
             diff,
+            change_id: session.change_id,
             diff_len,
             diff_scroll: 0,
             diff_height: 0,
-            fields: Field::ALL.map(|field| field_editor(field, "")),
+            fields: Field::ALL.map(|field| field_editor(field, draft.get(field))),
             field: Field::Type,
+            raw: raw_editor(&original),
+            view,
             focus: Focus::Editor,
-            original: String::new(),
-            status: None,
-            keymap,
-            vim: Vim::new(vim::Mode::Insert),
+            original,
+            status,
+            keymap: session.keymap,
+            vim: Vim::new(mode),
         }
     }
 
@@ -113,12 +164,28 @@ impl App {
         draft
     }
 
+    /// The message as it stands, valid or not.
+    fn message(&self) -> String {
+        match self.view {
+            View::Structured => self.draft().render(),
+            View::Raw => self.raw.lines().join("\n").trim_end().to_owned(),
+        }
+    }
+
     fn is_dirty(&self) -> bool {
-        self.draft().render() != self.original
+        self.message() != self.original
     }
 
     const fn editor(&mut self) -> &mut TextArea<'static> {
-        &mut self.fields[self.field as usize]
+        match self.view {
+            View::Structured => &mut self.fields[self.field as usize],
+            View::Raw => &mut self.raw,
+        }
+    }
+
+    /// Enter inserts a newline here (rather than moving to the next field).
+    const fn editor_is_multiline(&self) -> bool {
+        matches!(self.view, View::Raw) || self.field.is_multiline()
     }
 
     // -----------------------------------------------------------------------
@@ -135,6 +202,7 @@ impl App {
         match key.code {
             KeyCode::Char('s') if ctrl => return self.submit(),
             KeyCode::Char('c') if ctrl => return self.quit(confirming),
+            KeyCode::Char('t') if ctrl => self.toggle_view(),
             KeyCode::Tab => self.cycle_focus(true),
             KeyCode::BackTab => self.cycle_focus(false),
             // Read the diff without leaving the field you're typing in.
@@ -192,12 +260,16 @@ impl App {
             KeyCode::Char('e') if ctrl => self.scroll_down(1),
             KeyCode::Char('y') if ctrl => self.scroll_up(1),
             _ => {
-                let editor = &mut self.fields[self.field as usize];
+                let form = self.view == View::Structured;
+                let editor = match self.view {
+                    View::Structured => &mut self.fields[self.field as usize],
+                    View::Raw => &mut self.raw,
+                };
                 match self.vim.handle(&Input::from(key), editor) {
-                    vim::Action::None => {}
                     vim::Action::Quit => return self.quit(confirming),
-                    vim::Action::NextField => self.focus_field(self.field.next()),
-                    vim::Action::PrevField => self.focus_field(self.field.prev()),
+                    vim::Action::NextField if form => self.focus_field(self.field.next()),
+                    vim::Action::PrevField if form => self.focus_field(self.field.prev()),
+                    _ => {}
                 }
             }
         }
@@ -206,6 +278,8 @@ impl App {
 
     fn editor_key(&mut self, key: KeyEvent, confirming: bool) -> Option<Exit> {
         let field = self.field;
+        let form = self.view == View::Structured;
+        let multiline = self.editor_is_multiline();
         // Shift+arrows select text, so only bare arrows leave the field.
         let plain = key.modifiers.is_empty();
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -217,12 +291,12 @@ impl App {
         match key.code {
             KeyCode::Esc => return self.quit(confirming),
             // Enter on a one-line field moves on, like a form.
-            KeyCode::Enter if !field.is_multiline() => self.focus_field(field.next()),
+            KeyCode::Enter if !multiline => self.focus_field(field.next()),
             // Arrowing off the top or bottom of a field moves between fields.
-            KeyCode::Up if plain && row == 0 && field != Field::Type => {
+            KeyCode::Up if form && plain && row == 0 && field != Field::Type => {
                 self.focus_field(field.prev());
             }
-            KeyCode::Down if plain && row == last_row && field.next() != field => {
+            KeyCode::Down if form && plain && row == last_row && field.next() != field => {
                 self.focus_field(field.next());
             }
             KeyCode::Char('z') if ctrl => {
@@ -243,7 +317,7 @@ impl App {
             return;
         }
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        let text = if self.field.is_multiline() {
+        let text = if self.editor_is_multiline() {
             text
         } else {
             text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -262,6 +336,10 @@ impl App {
 
     /// Finish with a valid message, or stay open and show why not.
     fn submit(&mut self) -> Option<Exit> {
+        if self.view == View::Raw {
+            // Raw text is the escape hatch: written exactly as typed.
+            return Some(Exit::Commit(self.message()));
+        }
         match self.draft().build() {
             Ok(message) => Some(Exit::Commit(message)),
             Err(e) => {
@@ -271,8 +349,41 @@ impl App {
         }
     }
 
-    /// Tab order: every form field, then the diff pane, then around again.
+    /// Switch between the form and the raw text. Going back to the form only
+    /// works if it can hold the text exactly.
+    fn toggle_view(&mut self) {
+        match self.view {
+            View::Structured => {
+                self.raw = raw_editor(&self.draft().render());
+                self.view = View::Raw;
+            }
+            View::Raw => match Draft::parse(&self.message()) {
+                Ok(draft) => {
+                    self.fields = Field::ALL.map(|field| field_editor(field, draft.get(field)));
+                    self.view = View::Structured;
+                }
+                Err(e) => {
+                    self.status = Some(Status::Error(format!("can't switch to the form: {e}")));
+                    return;
+                }
+            },
+        }
+        self.focus = Focus::Editor;
+        if matches!(self.vim.mode, vim::Mode::Visual | vim::Mode::Operator(_)) {
+            self.vim.mode = vim::Mode::Normal;
+        }
+    }
+
+    /// Tab order: every form field (or the raw editor), then the diff pane,
+    /// then around again.
     fn cycle_focus(&mut self, forward: bool) {
+        if self.view == View::Raw {
+            self.focus = match self.focus {
+                Focus::Diff => Focus::Editor,
+                Focus::Editor => Focus::Diff,
+            };
+            return;
+        }
         let stops = Field::ALL.len() + 1;
         let current = match self.focus {
             Focus::Editor => self.field as usize,
@@ -338,13 +449,16 @@ impl App {
         let accent = self.accent();
         let diff = Paragraph::new(self.diff.clone())
             .block(pane(
-                " Diff ".into(),
+                format!(" Diff {} ", self.change_id).into(),
                 (self.focus == Focus::Diff).then_some(accent),
             ))
             .scroll((self.diff_scroll, 0));
         frame.render_widget(diff, diff_area);
 
-        self.draw_form(frame, form_area);
+        match self.view {
+            View::Structured => self.draw_form(frame, form_area),
+            View::Raw => self.draw_raw(frame, form_area),
+        }
         frame.render_widget(self.status_line(), status);
     }
 
@@ -374,13 +488,22 @@ impl App {
                 field_title(field, header_len),
                 focused.then_some(accent),
             ));
-            editor.set_cursor_style(if focused {
-                Style::new().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::new()
-            });
+            editor.set_cursor_style(cursor_style(focused));
             frame.render_widget(&*editor, area);
         }
+    }
+
+    fn draw_raw(&mut self, frame: &mut Frame, area: Rect) {
+        let header_len = self.raw.lines()[0].chars().count();
+        let title = Line::from(vec![
+            Span::raw(" Message (raw) "),
+            header_counter(header_len),
+        ]);
+        let focused = self.focus == Focus::Editor;
+        let accent = self.accent();
+        self.raw.set_block(pane(title, focused.then_some(accent)));
+        self.raw.set_cursor_style(cursor_style(focused));
+        frame.render_widget(&self.raw, area);
     }
 
     /// Border color of the focused pane: green in Vim's Normal mode,
@@ -396,6 +519,7 @@ impl App {
     fn status_line(&self) -> Line<'static> {
         match &self.status {
             Some(Status::Error(err)) => return Line::from(format!(" ✗ {err}")).red().bold(),
+            Some(Status::Info(info)) => return Line::from(format!(" {info}")).cyan(),
             Some(Status::ConfirmQuit) => {
                 return Line::from(
                     " Unsaved changes. Quit again to discard them, or press any other key to keep editing.",
@@ -410,14 +534,14 @@ impl App {
                 " j/k scroll · ^d/^u half page · g/G top/bottom · Esc back · ^s save"
             }
             (Focus::Editor, Keymap::Default, _) => {
-                " Tab next field · Enter next/newline · PgUp/PgDn diff · ^z undo · ^s save · Esc quit"
+                " Tab next · Enter next/newline · PgUp/PgDn diff · ^t raw/form · ^s save · Esc quit"
             }
             (Focus::Editor, Keymap::Vim, vim::Mode::Insert) => {
-                " Esc normal · Tab next field · Enter next/newline · ^s save"
+                " Esc normal · Tab next · Enter next/newline · ^t raw/form · ^s save"
             }
             (Focus::Editor, Keymap::Vim, vim::Mode::Visual) => " d/c/y operate · Esc cancel",
             (Focus::Editor, Keymap::Vim, _) => {
-                " i insert · j/k/Tab fields · ^d/^u diff · u undo · ^s save · q quit"
+                " i insert · j/k/Tab fields · ^d/^u diff · ^t raw/form · ^s save · q quit"
             }
         };
         let mut spans = Vec::new();
@@ -428,6 +552,22 @@ impl App {
         spans.push(Span::raw(keys).dark_gray());
         Line::from(spans)
     }
+}
+
+fn cursor_style(focused: bool) -> Style {
+    if focused {
+        Style::new().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::new()
+    }
+}
+
+/// The raw message editor, cursor at the start.
+fn raw_editor(text: &str) -> TextArea<'static> {
+    let mut editor = TextArea::new(text.split('\n').map(str::to_owned).collect());
+    editor.set_cursor_line_style(Style::new());
+    editor.set_wrap_mode(WrapMode::WordOrGlyph);
+    editor
 }
 
 /// An editor for `field`, pre-filled with `text`, cursor at the end.

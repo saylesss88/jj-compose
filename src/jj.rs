@@ -94,6 +94,20 @@ impl Jj {
         })
     }
 
+    /// The current description of `target`.
+    pub fn description(&self, target: &Target) -> Result<String> {
+        let stdout = self.output(&[
+            "log",
+            "--no-graph",
+            "--color=never",
+            "-r",
+            &target.commit_id,
+            "-T",
+            "description",
+        ])?;
+        Ok(String::from_utf8(stdout)?)
+    }
+
     /// Set the description of `target`.
     ///
     /// The message goes over stdin rather than `-m`, so a message starting

@@ -217,10 +217,6 @@ impl Draft {
     /// Split an existing message into fields, if that can be done without
     /// changing it: `parse(m)?.render()` is always `m` minus trailing
     /// whitespace.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used once descriptions are loaded")
-    )]
     pub fn parse(message: &str) -> Result<Self, ParseError> {
         let message = message.trim_end();
         let mut draft = Self::default();

@@ -23,7 +23,7 @@ use std::{error::Error, io, path::PathBuf};
 
 use clap::Parser;
 
-use app::{App, Exit, Keymap};
+use app::{App, Exit, Keymap, Session};
 use diff::{DiffFormat, load_diff};
 use jj::Jj;
 use ratatui::crossterm::{
@@ -54,6 +54,10 @@ struct Args {
     /// Key bindings for the editor
     #[arg(long, value_enum, env = "JJ_COMPOSE_KEYMAP", default_value = "default")]
     keymap: Keymap,
+
+    /// Start in the raw message editor instead of the form
+    #[arg(long)]
+    raw: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -70,15 +74,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         DiffFormat::Jj
     };
     let diff = load_diff(&jj, &target, format)?;
+    let description = jj.description(&target)?;
+    let session = Session {
+        description: description.clone(),
+        change_id: target.change_id.clone(),
+        keymap: args.keymap,
+        raw: args.raw,
+    };
 
     let mut terminal = init_terminal()?;
-    let result = App::new(diff, args.keymap).run(&mut terminal);
+    let result = App::new(diff, session).run(&mut terminal);
     restore_terminal();
 
     // Run `jj describe` only after the terminal is restored, so its output
     // (and any error) is visible to the user.
     if let Exit::Commit(message) = result? {
-        jj.describe(&target, &message)?;
+        if message == description.trim_end() {
+            eprintln!("Description of {} unchanged.", target.change_id);
+        } else {
+            jj.describe(&target, &message)?;
+        }
     }
 
     Ok(())
