@@ -617,7 +617,7 @@ impl App {
     }
 }
 
-fn cursor_style(focused: bool) -> Style {
+const fn cursor_style(focused: bool) -> Style {
     if focused {
         Style::new().add_modifier(Modifier::REVERSED)
     } else {

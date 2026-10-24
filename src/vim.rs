@@ -273,10 +273,10 @@ impl Vim {
     fn apply(&mut self, op: char, editor: &mut TextArea<'_>) {
         self.mode = Mode::Normal;
         let linewise = self.linewise.take();
-        let start = match linewise {
-            Some(row) => Some((row, 0)),
-            None => editor.selection_range().map(|(start, _)| start),
-        };
+        let start = linewise.map_or_else(
+            || editor.selection_range().map(|(start, _)| start),
+            |row| Some((row, 0)),
+        );
         match op {
             'y' => {
                 editor.copy();

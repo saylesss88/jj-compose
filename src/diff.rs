@@ -113,7 +113,7 @@ impl DiffView {
         self.scroll = 0;
     }
 
-    pub fn scroll_to_bottom(&mut self) {
+    pub const fn scroll_to_bottom(&mut self) {
         self.scroll = self.max_scroll();
     }
 

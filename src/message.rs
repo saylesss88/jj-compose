@@ -206,10 +206,11 @@ impl Draft {
             if text.is_empty() {
                 continue;
             }
-            parts.push(match field.heading() {
-                Some(heading) => format!("{heading}\n{text}"),
-                None => text.to_owned(),
-            });
+            parts.push(
+                field
+                    .heading()
+                    .map_or_else(|| text.to_owned(), |heading| format!("{heading}\n{text}")),
+            );
         }
         parts.join("\n\n")
     }
