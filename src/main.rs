@@ -17,12 +17,13 @@ mod app;
 mod diff;
 mod jj;
 mod message;
+mod vim;
 
 use std::{error::Error, io, path::PathBuf};
 
 use clap::Parser;
 
-use app::{App, Exit};
+use app::{App, Exit, Keymap};
 use diff::{DiffFormat, load_diff};
 use jj::Jj;
 use ratatui::crossterm::{
@@ -49,6 +50,10 @@ struct Args {
     /// Show the diff in git format instead of jj's configured format
     #[arg(long)]
     git: bool,
+
+    /// Key bindings for the editor
+    #[arg(long, value_enum, env = "JJ_COMPOSE_KEYMAP", default_value = "default")]
+    keymap: Keymap,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -67,7 +72,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let diff = load_diff(&jj, &target, format)?;
 
     let mut terminal = init_terminal()?;
-    let result = App::new(diff).run(&mut terminal);
+    let result = App::new(diff, args.keymap).run(&mut terminal);
     restore_terminal();
 
     // Run `jj describe` only after the terminal is restored, so its output

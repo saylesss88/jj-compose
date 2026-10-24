@@ -12,7 +12,20 @@ use ratatui::{
 };
 use ratatui_textarea::{CursorMove, Input, TextArea, WrapMode};
 
-use crate::message::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT};
+use crate::{
+    message::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT},
+    vim::{self, Vim},
+};
+
+/// Which key bindings the editor uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Keymap {
+    /// Type immediately; standard editing keys (the default)
+    #[default]
+    Default,
+    /// Modal editing: Normal/Insert/Visual with Vim motions
+    Vim,
+}
 
 /// Where keyboard focus is: the diff pane, or the current form field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,10 +61,13 @@ pub struct App {
     /// The message the session started with, to detect unsaved edits.
     original: String,
     status: Option<Status>,
+    keymap: Keymap,
+    /// Modal state, used only with [`Keymap::Vim`].
+    vim: Vim,
 }
 
 impl App {
-    pub fn new(diff: Text<'static>) -> Self {
+    pub fn new(diff: Text<'static>, keymap: Keymap) -> Self {
         let diff_len = u16::try_from(diff.lines.len()).unwrap_or(u16::MAX);
         Self {
             diff,
@@ -63,6 +79,8 @@ impl App {
             focus: Focus::Editor,
             original: String::new(),
             status: None,
+            keymap,
+            vim: Vim::new(vim::Mode::Insert),
         }
     }
 
@@ -126,10 +144,8 @@ impl App {
             KeyCode::Up if alt => self.scroll_up(1),
             _ => {
                 return match self.focus {
-                    Focus::Diff => {
-                        self.diff_key(key.code, ctrl);
-                        None
-                    }
+                    Focus::Diff => self.diff_key(key.code, ctrl, confirming),
+                    Focus::Editor if self.keymap == Keymap::Vim => self.vim_key(key, confirming),
                     Focus::Editor => self.editor_key(key, confirming),
                 };
             }
@@ -137,8 +153,9 @@ impl App {
         None
     }
 
-    fn diff_key(&mut self, code: KeyCode, ctrl: bool) {
+    fn diff_key(&mut self, code: KeyCode, ctrl: bool, confirming: bool) -> Option<Exit> {
         match code {
+            KeyCode::Char('q') if self.keymap == Keymap::Vim => return self.quit(confirming),
             KeyCode::Char('j') | KeyCode::Down => self.scroll_down(1),
             KeyCode::Char('k') | KeyCode::Up => self.scroll_up(1),
             KeyCode::Char('d') if ctrl => self.scroll_down(self.diff_height / 2),
@@ -149,6 +166,42 @@ impl App {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i') => self.focus = Focus::Editor,
             _ => {}
         }
+        None
+    }
+
+    fn vim_key(&mut self, key: KeyEvent, confirming: bool) -> Option<Exit> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.vim.mode == vim::Mode::Insert {
+            if key.code != KeyCode::Esc {
+                // Insert mode types like the default keymap.
+                return self.editor_key(key, confirming);
+            }
+            self.vim.mode = vim::Mode::Normal;
+            let editor = self.editor();
+            if editor.cursor().1 > 0 {
+                editor.move_cursor(CursorMove::Back);
+            }
+            return None;
+        }
+
+        // Normal mode: the scroll keys that would move a long buffer move
+        // the diff instead, since fields are short.
+        match key.code {
+            KeyCode::Char('d') if ctrl => self.scroll_down(self.diff_height / 2),
+            KeyCode::Char('u') if ctrl => self.scroll_up(self.diff_height / 2),
+            KeyCode::Char('e') if ctrl => self.scroll_down(1),
+            KeyCode::Char('y') if ctrl => self.scroll_up(1),
+            _ => {
+                let editor = &mut self.fields[self.field as usize];
+                match self.vim.handle(&Input::from(key), editor) {
+                    vim::Action::None => {}
+                    vim::Action::Quit => return self.quit(confirming),
+                    vim::Action::NextField => self.focus_field(self.field.next()),
+                    vim::Action::PrevField => self.focus_field(self.field.prev()),
+                }
+            }
+        }
+        None
     }
 
     fn editor_key(&mut self, key: KeyEvent, confirming: bool) -> Option<Exit> {
@@ -230,13 +283,20 @@ impl App {
         } else {
             (current + stops - 1) % stops
         };
-        match Field::ALL.get(next) {
-            Some(&field) => self.focus_field(field),
-            None => self.focus = Focus::Diff,
+        if let Some(&field) = Field::ALL.get(next) {
+            self.focus_field(field);
+        } else {
+            self.editor().cancel_selection();
+            self.focus = Focus::Diff;
         }
     }
 
-    const fn focus_field(&mut self, field: Field) {
+    fn focus_field(&mut self, field: Field) {
+        // Leave no half-finished selection or operator behind.
+        self.editor().cancel_selection();
+        if matches!(self.vim.mode, vim::Mode::Visual | vim::Mode::Operator(_)) {
+            self.vim.mode = vim::Mode::Normal;
+        }
         self.focus = Focus::Editor;
         self.field = field;
     }
@@ -275,8 +335,12 @@ impl App {
         self.diff_height = diff_area.height.saturating_sub(2);
         self.diff_scroll = self.diff_scroll.min(self.max_scroll());
 
+        let accent = self.accent();
         let diff = Paragraph::new(self.diff.clone())
-            .block(pane(" Diff ".into(), self.focus == Focus::Diff))
+            .block(pane(
+                " Diff ".into(),
+                (self.focus == Focus::Diff).then_some(accent),
+            ))
             .scroll((self.diff_scroll, 0));
         frame.render_widget(diff, diff_area);
 
@@ -297,16 +361,29 @@ impl App {
         let areas = [ty, scope, subject, problem, solution];
 
         let header_len = self.draft().header().chars().count();
+        let accent = self.accent();
         for (field, area) in Field::ALL.into_iter().zip(areas) {
             let focused = self.focus == Focus::Editor && self.field == field;
             let editor = &mut self.fields[field as usize];
-            editor.set_block(pane(field_title(field, header_len), focused));
+            editor.set_block(pane(
+                field_title(field, header_len),
+                focused.then_some(accent),
+            ));
             editor.set_cursor_style(if focused {
                 Style::new().add_modifier(Modifier::REVERSED)
             } else {
                 Style::new()
             });
             frame.render_widget(&*editor, area);
+        }
+    }
+
+    /// Border color of the focused pane: green in Vim's Normal mode,
+    /// yellow while typing.
+    const fn accent(&self) -> Color {
+        match (self.keymap, self.vim.mode) {
+            (Keymap::Vim, vim::Mode::Insert) | (Keymap::Default, _) => Color::Yellow,
+            (Keymap::Vim, _) => Color::Green,
         }
     }
 
@@ -323,13 +400,28 @@ impl App {
             }
             None => {}
         }
-        let keys = match self.focus {
-            Focus::Editor => {
+        let keys = match (self.focus, self.keymap, self.vim.mode) {
+            (Focus::Diff, ..) => {
+                " j/k scroll · ^d/^u half page · g/G top/bottom · Esc back · ^s save"
+            }
+            (Focus::Editor, Keymap::Default, _) => {
                 " Tab next field · Enter next/newline · PgUp/PgDn diff · ^z undo · ^s save · Esc quit"
             }
-            Focus::Diff => " j/k scroll · ^d/^u half page · g/G top/bottom · Esc back · ^s save",
+            (Focus::Editor, Keymap::Vim, vim::Mode::Insert) => {
+                " Esc normal · Tab next field · Enter next/newline · ^s save"
+            }
+            (Focus::Editor, Keymap::Vim, vim::Mode::Visual) => " d/c/y operate · Esc cancel",
+            (Focus::Editor, Keymap::Vim, _) => {
+                " i insert · j/k/Tab fields · ^d/^u diff · u undo · ^s save · q quit"
+            }
         };
-        Line::from(Span::raw(keys).dark_gray())
+        let mut spans = Vec::new();
+        if self.keymap == Keymap::Vim {
+            let badge = Span::raw(self.vim.mode.label()).black();
+            spans.push(badge.bg(self.accent()));
+        }
+        spans.push(Span::raw(keys).dark_gray());
+        Line::from(spans)
     }
 }
 
@@ -347,13 +439,9 @@ fn field_editor(field: Field, text: &str) -> TextArea<'static> {
     editor
 }
 
-/// A bordered pane, highlighted when focused.
-fn pane(title: Line<'static>, focused: bool) -> Block<'static> {
-    let style = if focused {
-        Style::new().fg(Color::Yellow)
-    } else {
-        Style::new().fg(Color::DarkGray)
-    };
+/// A bordered pane, drawn in `accent` when focused.
+fn pane(title: Line<'static>, accent: Option<Color>) -> Block<'static> {
+    let style = Style::new().fg(accent.unwrap_or(Color::DarkGray));
     Block::bordered()
         .title(title)
         .border_style(style)
