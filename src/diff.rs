@@ -1,6 +1,6 @@
 //! The diff pane: loading `jj diff` output and scrolling through it.
 
-use std::error::Error;
+use std::{error::Error, iter};
 
 use ansi_to_tui::IntoText;
 use ratatui::{
@@ -58,7 +58,7 @@ fn expand_tabs(bytes: &[u8]) -> Vec<u8> {
         match b {
             b'\t' => {
                 let spaces = TAB_WIDTH - column % TAB_WIDTH;
-                out.extend(std::iter::repeat_n(b' ', spaces));
+                out.extend(iter::repeat_n(b' ', spaces));
                 column += spaces;
                 continue;
             }
