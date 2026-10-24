@@ -24,15 +24,24 @@ impl Mode {
     }
 }
 
+/// A direction to move focus in, as the panes are laid out on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
 /// What the form should do after a key, beyond editing the field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     None,
     Quit,
+    /// `Enter`: the next field in Tab order.
     NextField,
-    PrevField,
-    /// `h` at the start of a line: move focus to the diff pane.
-    FocusDiff,
+    /// `h`/`j`/`k`/`l` ran into the edge of the text.
+    Move(Dir),
 }
 
 #[derive(Debug)]
@@ -77,17 +86,19 @@ impl Vim {
             Key::Char('q') if self.mode == Mode::Normal => return Action::Quit,
             Key::Enter if self.mode == Mode::Normal => return Action::NextField,
 
-            // At the edge of a field, j/k carry on into the next one.
+            // At the edge of the text, h/j/k/l carry on into whatever is
+            // next to this field on screen.
             Key::Char('j') | Key::Down if self.mode == Mode::Normal && row == last_row => {
-                return Action::NextField;
+                return Action::Move(Dir::Down);
             }
             Key::Char('k') | Key::Up if self.mode == Mode::Normal && row == 0 => {
-                return Action::PrevField;
+                return Action::Move(Dir::Up);
             }
-            // Likewise `h` at the start of a line carries on into the diff,
-            // which sits to the left.
             Key::Char('h') | Key::Left if self.mode == Mode::Normal && editor.cursor().1 == 0 => {
-                return Action::FocusDiff;
+                return Action::Move(Dir::Left);
+            }
+            Key::Char('l') | Key::Right if self.mode == Mode::Normal && at_line_end(editor) => {
+                return Action::Move(Dir::Right);
             }
 
             // Motions (also the targets of a pending operator).
@@ -404,7 +415,11 @@ mod tests {
     fn j_on_last_line_leaves_field() {
         let mut editor = TextArea::new(vec!["only".into()]);
         let mut vim = Vim::new(Mode::Normal);
-        assert_eq!(vim.handle(&key('j'), &mut editor), Action::NextField);
-        assert_eq!(vim.handle(&key('k'), &mut editor), Action::PrevField);
+        assert_eq!(vim.handle(&key('j'), &mut editor), Action::Move(Dir::Down));
+        assert_eq!(vim.handle(&key('k'), &mut editor), Action::Move(Dir::Up));
+        editor.move_cursor(CursorMove::End);
+        assert_eq!(vim.handle(&key('l'), &mut editor), Action::Move(Dir::Right));
+        editor.move_cursor(CursorMove::Head);
+        assert_eq!(vim.handle(&key('h'), &mut editor), Action::Move(Dir::Left));
     }
 }

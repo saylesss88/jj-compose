@@ -15,7 +15,7 @@ use ratatui_textarea::{CursorMove, Input, TextArea, WrapMode};
 use crate::{
     diff::DiffView,
     message::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT},
-    vim::{self, Vim},
+    vim::{self, Dir, Vim},
 };
 
 /// Which key bindings the editor uses.
@@ -48,6 +48,13 @@ pub struct Session {
     pub raw: bool,
 }
 
+/// Somewhere focus can move to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    Diff,
+    Field(Field),
+}
+
 /// Where keyboard focus is: the diff pane, or the editor (the current form
 /// field, or the raw message).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +84,8 @@ pub struct App {
     fields: [TextArea<'static>; Field::ALL.len()],
     /// The form field being edited, or to return to from the diff pane.
     field: Field,
+    /// Type or Scope, whichever was left last: where Up from Subject goes.
+    top_field: Field,
     /// The whole message, used in [`View::Raw`].
     raw: TextArea<'static>,
     view: View,
@@ -118,6 +127,7 @@ impl App {
             change_id: session.change_id,
             fields: Field::ALL.map(|field| field_editor(field, draft.get(field))),
             field: Field::Type,
+            top_field: Field::Type,
             raw: raw_editor(&original),
             view,
             focus: Focus::Editor,
@@ -268,9 +278,10 @@ impl App {
                 };
                 match self.vim.handle(&Input::from(key), editor) {
                     vim::Action::Quit => return self.quit(confirming),
-                    vim::Action::FocusDiff => self.focus_diff(),
                     vim::Action::NextField if form => self.focus_field(self.field.next()),
-                    vim::Action::PrevField if form => self.focus_field(self.field.prev()),
+                    vim::Action::Move(dir) => {
+                        self.go(dir);
+                    }
                     _ => {}
                 }
             }
@@ -287,26 +298,35 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let editor = self.editor();
-        let row = editor.cursor().0;
+        let (row, col) = (editor.cursor().0, editor.cursor().1);
         let last_row = editor.lines().len() - 1;
+        let line_len = editor.lines()[row].chars().count();
+        // Arrowing off the edge of a field moves to the field next to it on
+        // screen; sideways only between Type and Scope, so holding an arrow
+        // key never lands in the diff.
+        let field_beyond =
+            |app: &Self, dir| form && plain && matches!(app.neighbor(dir), Some(Stop::Field(_)));
 
         match key.code {
             KeyCode::Esc => return self.quit(confirming),
             // Enter on a one-line field moves on, like a form.
             KeyCode::Enter if !multiline => self.focus_field(field.next()),
-            // Arrowing off the top or bottom of a field moves between fields.
-            KeyCode::Up if form && plain && row == 0 && field != Field::Type => {
-                self.focus_field(field.prev());
+            KeyCode::Up if row == 0 && field_beyond(self, Dir::Up) => self.go(Dir::Up),
+            KeyCode::Down if row == last_row && field_beyond(self, Dir::Down) => {
+                self.go(Dir::Down);
             }
-            KeyCode::Down if form && plain && row == last_row && field.next() != field => {
-                self.focus_field(field.next());
+            KeyCode::Left if col == 0 && field_beyond(self, Dir::Left) => self.go(Dir::Left),
+            KeyCode::Right
+                if row == last_row && col == line_len && field_beyond(self, Dir::Right) =>
+            {
+                self.go(Dir::Right);
             }
             KeyCode::Char('z') if ctrl => {
-                editor.undo();
+                self.editor().undo();
             }
-            KeyCode::Char('w') if alt => editor.copy(),
+            KeyCode::Char('w') if alt => self.editor().copy(),
             _ => {
-                editor.input(Input::from(key));
+                self.editor().input(Input::from(key));
             }
         }
         None
@@ -412,7 +432,62 @@ impl App {
         }
     }
 
+    /// What lies in `dir` from the current field, as laid out on screen:
+    ///
+    /// ```text
+    ///  diff | Type | Scope
+    ///       | Subject
+    ///       | Body ... Trailers
+    /// ```
+    fn neighbor(&self, dir: Dir) -> Option<Stop> {
+        use Field::{Scope, Subject, Trailers, Type};
+        if self.view == View::Raw {
+            return (dir == Dir::Left).then_some(Stop::Diff);
+        }
+        let field = match (dir, self.field) {
+            (Dir::Up, Type | Scope) | (Dir::Down, Trailers) => {
+                return None;
+            }
+            (Dir::Right, _) if self.field != Type => return None,
+            (Dir::Left, f) if f != Scope => return Some(Stop::Diff),
+            (Dir::Up, Subject) => self.top_field,
+            (Dir::Down, Type | Scope) => Subject,
+            (Dir::Left, _) => Type,
+            (Dir::Right, _) => Scope,
+            (Dir::Up, f) => f.prev(),
+            (Dir::Down, f) => f.next(),
+        };
+        Some(Stop::Field(field))
+    }
+
+    /// Move focus in `dir`, if there's anything there.
+    fn go(&mut self, dir: Dir) {
+        match self.neighbor(dir) {
+            Some(Stop::Field(field)) => {
+                self.focus_field(field);
+                // Arrive at the side you came from, so l then h is a no-op.
+                let editor = self.editor();
+                match dir {
+                    Dir::Right => {
+                        editor.move_cursor(CursorMove::Top);
+                        editor.move_cursor(CursorMove::Head);
+                    }
+                    Dir::Left => {
+                        editor.move_cursor(CursorMove::Bottom);
+                        editor.move_cursor(CursorMove::End);
+                    }
+                    Dir::Up | Dir::Down => {}
+                }
+            }
+            Some(Stop::Diff) => self.focus_diff(),
+            None => {}
+        }
+    }
+
     fn focus_field(&mut self, field: Field) {
+        if matches!(self.field, Field::Type | Field::Scope) {
+            self.top_field = self.field;
+        }
         // Leave no half-finished selection or operator behind.
         self.editor().cancel_selection();
         if matches!(self.vim.mode, vim::Mode::Visual | vim::Mode::Operator(_)) {
@@ -529,7 +604,7 @@ impl App {
             }
             (Focus::Editor, Keymap::Vim, vim::Mode::Visual) => " d/c/y operate · Esc cancel",
             (Focus::Editor, Keymap::Vim, _) => {
-                " i insert · j/k fields · h diff · ^d/^u scroll diff · ^t raw/form · ^s save · q quit"
+                " i insert · hjkl past an edge: next box · ^d/^u scroll diff · ^t raw/form · ^s save · q quit"
             }
         };
         let mut spans = Vec::new();
@@ -765,6 +840,55 @@ mod tests {
     }
 
     #[test]
+    fn vim_hjkl_follow_the_layout() {
+        let mut app = app("", Keymap::Vim);
+        press(&mut app, KeyCode::Esc);
+        let mut go = |c| {
+            press(&mut app, KeyCode::Char(c));
+            (app.focus, app.field)
+        };
+        let field = |f| (Focus::Editor, f);
+        // Type and Scope sit side by side above Subject.
+        assert_eq!(go('l'), field(Field::Scope));
+        assert_eq!(go('j'), field(Field::Subject));
+        assert_eq!(go('k'), field(Field::Scope));
+        assert_eq!(go('h'), field(Field::Type));
+        assert_eq!(go('j'), field(Field::Subject));
+        assert_eq!(go('k'), field(Field::Type));
+        assert_eq!(go('k'), field(Field::Type));
+        // Left of Type, and of everything below, is the diff.
+        assert_eq!(go('h').0, Focus::Diff);
+        assert_eq!(go('l'), field(Field::Type));
+
+        // With text in both: l lands at the start of Scope, so h goes
+        // straight back.
+        let mut app = super::tests::app(EXAMPLE, Keymap::Vim);
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.field, Field::Scope);
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.field, Field::Type);
+        go('j');
+        assert_eq!(go('j'), field(Field::Body));
+        assert_eq!(go('h').0, Focus::Diff);
+    }
+
+    #[test]
+    fn arrows_at_field_edges_follow_the_layout() {
+        let mut app = app("", Keymap::Default);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.field, Field::Scope);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.field, Field::Subject);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.field, Field::Scope);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.field, Field::Type);
+        // Holding Left never wanders into the diff.
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.focus, Focus::Editor);
+    }
+
+    #[test]
     fn alt_arrows_jump_to_the_diff_and_back() {
         let mut app = app("", Keymap::Default);
         let alt = |code| KeyEvent::new(code, KeyModifiers::ALT);
@@ -784,8 +908,9 @@ mod tests {
     fn vim_j_walks_fields_and_q_quits() {
         let mut app = app(EXAMPLE, Keymap::Vim);
         press(&mut app, KeyCode::Char('j'));
-        press(&mut app, KeyCode::Char('j'));
         assert_eq!(app.field, Field::Subject);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.field, Field::Body);
         assert!(matches!(
             press(&mut app, KeyCode::Char('q')),
             Some(Exit::Abort)
