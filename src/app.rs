@@ -587,3 +587,168 @@ fn header_counter(len: usize) -> Span<'static> {
         Style::new().fg(color),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXAMPLE: &str = "fix(parser): handle empty input\n\n\
+                           This also corrects an unrelated diagnostic.\n\n\
+                           Fixes #42\nReviewed-by: Someone\n";
+
+    fn app(description: &str, keymap: Keymap) -> App {
+        App::new(
+            Text::raw("diff"),
+            Session {
+                description: description.into(),
+                change_id: "abc".into(),
+                keymap,
+                raw: false,
+            },
+        )
+    }
+
+    fn press(app: &mut App, code: KeyCode) -> Option<Exit> {
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn ctrl(app: &mut App, c: char) -> Option<Exit> {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    }
+
+    fn type_str(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    fn committed(exit: Option<Exit>) -> String {
+        match exit {
+            Some(Exit::Commit(message)) => message,
+            _ => panic!("expected a commit"),
+        }
+    }
+
+    #[test]
+    fn types_immediately_and_enter_moves_on() {
+        let mut app = app("", Keymap::Default);
+        type_str(&mut app, "feat");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+        type_str(&mut app, "add a thing");
+        assert_eq!(committed(ctrl(&mut app, 's')), "feat: add a thing");
+    }
+
+    #[test]
+    fn opens_existing_description_in_the_form_and_saves_it_unchanged() {
+        let mut app = app(EXAMPLE, Keymap::Default);
+        assert_eq!(app.view, View::Structured);
+        assert!(!app.is_dirty());
+        assert_eq!(committed(ctrl(&mut app, 's')), EXAMPLE.trim_end());
+    }
+
+    #[test]
+    fn edits_mid_line() {
+        let mut app = app(EXAMPLE, Keymap::Default);
+        app.focus_field(Field::Subject);
+        press(&mut app, KeyCode::Home);
+        type_str(&mut app, "gracefully ");
+        let message = committed(ctrl(&mut app, 's'));
+        assert!(message.starts_with("fix(parser): gracefully handle empty input\n"));
+        assert!(message.ends_with("Fixes #42\nReviewed-by: Someone"));
+    }
+
+    #[test]
+    fn unparseable_description_opens_raw_and_saves_verbatim() {
+        let mut app = app("WIP\nstuff", Keymap::Default);
+        assert_eq!(app.view, View::Raw);
+        assert!(matches!(app.status, Some(Status::Info(_))));
+        assert_eq!(committed(ctrl(&mut app, 's')), "WIP\nstuff");
+    }
+
+    #[test]
+    fn raw_view_round_trips_through_the_form() {
+        let mut app = app(EXAMPLE, Keymap::Default);
+        ctrl(&mut app, 't');
+        assert_eq!(app.view, View::Raw);
+        assert_eq!(app.message(), EXAMPLE.trim_end());
+        ctrl(&mut app, 't');
+        assert_eq!(app.view, View::Structured);
+        assert!(!app.is_dirty());
+    }
+
+    #[test]
+    fn refuses_to_switch_to_the_form_when_it_would_lose_text() {
+        let mut app = app("WIP", Keymap::Default);
+        ctrl(&mut app, 't');
+        assert_eq!(app.view, View::Raw);
+        assert!(matches!(app.status, Some(Status::Error(_))));
+    }
+
+    #[test]
+    fn invalid_form_stays_open_with_an_error() {
+        let mut app = app("", Keymap::Default);
+        type_str(&mut app, "two words");
+        assert!(ctrl(&mut app, 's').is_none());
+        assert!(matches!(app.status, Some(Status::Error(_))));
+    }
+
+    #[test]
+    fn quitting_with_edits_asks_first() {
+        let mut clean = app(EXAMPLE, Keymap::Default);
+        assert!(matches!(press(&mut clean, KeyCode::Esc), Some(Exit::Abort)));
+
+        let mut dirty = app("", Keymap::Default);
+        type_str(&mut dirty, "x");
+        assert!(press(&mut dirty, KeyCode::Esc).is_none());
+        assert!(matches!(press(&mut dirty, KeyCode::Esc), Some(Exit::Abort)));
+
+        // Any other key cancels the prompt.
+        assert!(press(&mut dirty, KeyCode::Esc).is_none());
+        type_str(&mut dirty, "y");
+        assert!(press(&mut dirty, KeyCode::Esc).is_none());
+    }
+
+    #[test]
+    fn paste_into_a_one_line_field_collapses_newlines() {
+        let mut app = app("", Keymap::Default);
+        app.focus_field(Field::Subject);
+        app.paste("add\r\nthe   thing\n");
+        assert_eq!(app.draft().get(Field::Subject), "add the thing");
+
+        app.focus_field(Field::Body);
+        app.paste("one\r\ntwo");
+        assert_eq!(app.draft().get(Field::Body), "one\ntwo");
+    }
+
+    #[test]
+    fn tab_cycles_through_fields_and_diff() {
+        let mut app = app("", Keymap::Default);
+        for _ in Field::ALL {
+            press(&mut app, KeyCode::Tab);
+        }
+        assert_eq!(app.focus, Focus::Diff);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!((app.focus, app.field), (Focus::Editor, Field::Type));
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.focus, Focus::Diff);
+    }
+
+    #[test]
+    fn vim_starts_in_insert_for_new_and_normal_for_existing() {
+        assert_eq!(app("", Keymap::Vim).vim.mode, vim::Mode::Insert);
+        assert_eq!(app(EXAMPLE, Keymap::Vim).vim.mode, vim::Mode::Normal);
+    }
+
+    #[test]
+    fn vim_j_walks_fields_and_q_quits() {
+        let mut app = app(EXAMPLE, Keymap::Vim);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.field, Field::Subject);
+        assert!(matches!(
+            press(&mut app, KeyCode::Char('q')),
+            Some(Exit::Abort)
+        ));
+    }
+}
