@@ -51,7 +51,10 @@ impl Jj {
             .output()
             .map_err(|e| format!("failed to run jj: {e}"))?;
         if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().into());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            // We add our own prefix; don't print `jj-compose: Error: ...`.
+            return Err(stderr.strip_prefix("Error: ").unwrap_or(stderr).into());
         }
         Ok(output.stdout)
     }

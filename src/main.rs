@@ -19,7 +19,7 @@ mod jj;
 mod message;
 mod vim;
 
-use std::{error::Error, io, path::PathBuf};
+use std::{error::Error, io, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 
@@ -60,8 +60,18 @@ struct Args {
     raw: bool,
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
+fn main() -> ExitCode {
+    match run(Args::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            // `Display`, not the `Debug` output `main` would print.
+            eprintln!("jj-compose: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(args: Args) -> Result<(), Box<dyn Error>> {
     let revset = args.revset.or(args.revision).unwrap_or_else(|| "@".into());
     let jj = Jj::new(args.repository);
 
