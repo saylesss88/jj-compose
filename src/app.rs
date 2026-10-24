@@ -8,11 +8,12 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, Paragraph},
+    widgets::Block,
 };
 use ratatui_textarea::{CursorMove, Input, TextArea, WrapMode};
 
 use crate::{
+    diff::DiffView,
     message::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT},
     vim::{self, Vim},
 };
@@ -70,12 +71,8 @@ pub enum Exit {
 }
 
 pub struct App {
-    diff: Text<'static>,
+    diff: DiffView,
     change_id: String,
-    diff_len: u16,
-    diff_scroll: u16,
-    /// Rows visible inside the diff pane, updated on every draw.
-    diff_height: u16,
     /// One editor per [`Field`], indexed by `field as usize`.
     fields: [TextArea<'static>; Field::ALL.len()],
     /// The form field being edited, or to return to from the diff pane.
@@ -94,7 +91,6 @@ pub struct App {
 
 impl App {
     pub fn new(diff: Text<'static>, session: Session) -> Self {
-        let diff_len = u16::try_from(diff.lines.len()).unwrap_or(u16::MAX);
         let original = session.description.trim_end().to_owned();
 
         // Open the form only if it can represent the description exactly;
@@ -118,11 +114,8 @@ impl App {
         };
 
         Self {
-            diff,
+            diff: DiffView::new(diff),
             change_id: session.change_id,
-            diff_len,
-            diff_scroll: 0,
-            diff_height: 0,
             fields: Field::ALL.map(|field| field_editor(field, draft.get(field))),
             field: Field::Type,
             raw: raw_editor(&original),
@@ -206,10 +199,10 @@ impl App {
             KeyCode::Tab => self.cycle_focus(true),
             KeyCode::BackTab => self.cycle_focus(false),
             // Read the diff without leaving the field you're typing in.
-            KeyCode::PageDown => self.scroll_down(self.diff_height / 2),
-            KeyCode::PageUp => self.scroll_up(self.diff_height / 2),
-            KeyCode::Down if alt => self.scroll_down(1),
-            KeyCode::Up if alt => self.scroll_up(1),
+            KeyCode::PageDown => self.diff.scroll_down(self.diff.half_page()),
+            KeyCode::PageUp => self.diff.scroll_up(self.diff.half_page()),
+            KeyCode::Down if alt => self.diff.scroll_down(1),
+            KeyCode::Up if alt => self.diff.scroll_up(1),
             _ => {
                 return match self.focus {
                     Focus::Diff => self.diff_key(key.code, ctrl, confirming),
@@ -224,13 +217,15 @@ impl App {
     fn diff_key(&mut self, code: KeyCode, ctrl: bool, confirming: bool) -> Option<Exit> {
         match code {
             KeyCode::Char('q') if self.keymap == Keymap::Vim => return self.quit(confirming),
-            KeyCode::Char('j') | KeyCode::Down => self.scroll_down(1),
-            KeyCode::Char('k') | KeyCode::Up => self.scroll_up(1),
-            KeyCode::Char('d') if ctrl => self.scroll_down(self.diff_height / 2),
-            KeyCode::Char('u') if ctrl => self.scroll_up(self.diff_height / 2),
-            KeyCode::Char(' ') => self.scroll_down(self.diff_height / 2),
-            KeyCode::Char('g') | KeyCode::Home => self.diff_scroll = 0,
-            KeyCode::Char('G') | KeyCode::End => self.diff_scroll = self.max_scroll(),
+            KeyCode::Char('j') | KeyCode::Down => self.diff.scroll_down(1),
+            KeyCode::Char('k') | KeyCode::Up => self.diff.scroll_up(1),
+            KeyCode::Char('d') if ctrl => self.diff.scroll_down(self.diff.half_page()),
+            KeyCode::Char('u') if ctrl => self.diff.scroll_up(self.diff.half_page()),
+            KeyCode::Char(' ') => self.diff.scroll_down(self.diff.half_page()),
+            KeyCode::Char('g') | KeyCode::Home => self.diff.scroll_to_top(),
+            KeyCode::Char('G') | KeyCode::End => self.diff.scroll_to_bottom(),
+            KeyCode::Char('l') | KeyCode::Right => self.diff.pan_right(8),
+            KeyCode::Char('h') | KeyCode::Left => self.diff.pan_left(8),
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i') => self.focus = Focus::Editor,
             _ => {}
         }
@@ -255,10 +250,10 @@ impl App {
         // Normal mode: the scroll keys that would move a long buffer move
         // the diff instead, since fields are short.
         match key.code {
-            KeyCode::Char('d') if ctrl => self.scroll_down(self.diff_height / 2),
-            KeyCode::Char('u') if ctrl => self.scroll_up(self.diff_height / 2),
-            KeyCode::Char('e') if ctrl => self.scroll_down(1),
-            KeyCode::Char('y') if ctrl => self.scroll_up(1),
+            KeyCode::Char('d') if ctrl => self.diff.scroll_down(self.diff.half_page()),
+            KeyCode::Char('u') if ctrl => self.diff.scroll_up(self.diff.half_page()),
+            KeyCode::Char('e') if ctrl => self.diff.scroll_down(1),
+            KeyCode::Char('y') if ctrl => self.diff.scroll_up(1),
             _ => {
                 let form = self.view == View::Structured;
                 let editor = match self.view {
@@ -412,22 +407,6 @@ impl App {
         self.field = field;
     }
 
-    /// The last scroll offset that still fills the pane.
-    const fn max_scroll(&self) -> u16 {
-        self.diff_len.saturating_sub(self.diff_height)
-    }
-
-    fn scroll_down(&mut self, n: u16) {
-        self.diff_scroll = self
-            .diff_scroll
-            .saturating_add(n.max(1))
-            .min(self.max_scroll());
-    }
-
-    fn scroll_up(&mut self, n: u16) {
-        self.diff_scroll = self.diff_scroll.saturating_sub(n.max(1));
-    }
-
     // -----------------------------------------------------------------------
     // Rendering
     // -----------------------------------------------------------------------
@@ -442,18 +421,12 @@ impl App {
             Layout::vertical([Constraint::Percentage(40), Constraint::Fill(1)]).areas(main)
         };
 
-        // Remember the viewport height for half-page scrolling and clamping.
-        self.diff_height = diff_area.height.saturating_sub(2);
-        self.diff_scroll = self.diff_scroll.min(self.max_scroll());
-
         let accent = self.accent();
-        let diff = Paragraph::new(self.diff.clone())
-            .block(pane(
-                format!(" Diff {} ", self.change_id).into(),
-                (self.focus == Focus::Diff).then_some(accent),
-            ))
-            .scroll((self.diff_scroll, 0));
-        frame.render_widget(diff, diff_area);
+        let block = pane(
+            format!(" Diff {} ", self.change_id).into(),
+            (self.focus == Focus::Diff).then_some(accent),
+        );
+        self.diff.render(frame, diff_area, block);
 
         match self.view {
             View::Structured => self.draw_form(frame, form_area),
@@ -531,7 +504,7 @@ impl App {
         }
         let keys = match (self.focus, self.keymap, self.vim.mode) {
             (Focus::Diff, ..) => {
-                " j/k scroll · ^d/^u half page · g/G top/bottom · Esc back · ^s save"
+                " j/k scroll · ^d/^u half page · g/G top/bottom · h/l pan · Esc back · ^s save"
             }
             (Focus::Editor, Keymap::Default, _) => {
                 " Tab next · Enter next/newline · PgUp/PgDn diff · ^t raw/form · ^s save · Esc quit"

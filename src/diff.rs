@@ -1,9 +1,14 @@
-//! Loading the diff shown next to the form.
+//! The diff pane: loading `jj diff` output and scrolling through it.
 
 use std::error::Error;
 
 use ansi_to_tui::IntoText;
-use ratatui::text::Text;
+use ratatui::{
+    Frame,
+    layout::Rect,
+    text::{Line, Text},
+    widgets::{Block, Paragraph},
+};
 
 use crate::jj::{Jj, Target};
 
@@ -70,6 +75,74 @@ fn expand_tabs(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The diff text plus its scroll position.
+pub struct DiffView {
+    lines: Vec<Line<'static>>,
+    /// First visible line.
+    scroll: usize,
+    /// Columns scrolled to the right, for long lines.
+    pan: u16,
+    /// Rows visible inside the pane, updated on every draw.
+    height: usize,
+}
+
+impl DiffView {
+    pub fn new(text: Text<'static>) -> Self {
+        Self {
+            lines: text.lines,
+            scroll: 0,
+            pan: 0,
+            height: 0,
+        }
+    }
+
+    /// Half the visible height (at least one line).
+    pub const fn half_page(&self) -> usize {
+        if self.height > 2 { self.height / 2 } else { 1 }
+    }
+
+    pub fn scroll_down(&mut self, n: usize) {
+        self.scroll = self.scroll.saturating_add(n).min(self.max_scroll());
+    }
+
+    pub const fn scroll_up(&mut self, n: usize) {
+        self.scroll = self.scroll.saturating_sub(n);
+    }
+
+    pub const fn scroll_to_top(&mut self) {
+        self.scroll = 0;
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll = self.max_scroll();
+    }
+
+    pub const fn pan_right(&mut self, n: u16) {
+        self.pan = self.pan.saturating_add(n);
+    }
+
+    pub const fn pan_left(&mut self, n: u16) {
+        self.pan = self.pan.saturating_sub(n);
+    }
+
+    /// The last scroll offset that still fills the pane.
+    const fn max_scroll(&self) -> usize {
+        self.lines.len().saturating_sub(self.height)
+    }
+
+    /// Draw only the visible lines, so a large diff costs the same per
+    /// frame as a small one.
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, block: Block<'static>) {
+        self.height = usize::from(block.inner(area).height);
+        self.scroll = self.scroll.min(self.max_scroll());
+
+        let end = (self.scroll + self.height).min(self.lines.len());
+        let visible = self.lines[self.scroll..end].to_vec();
+        let paragraph = Paragraph::new(visible).block(block).scroll((0, self.pan));
+        frame.render_widget(paragraph, area);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +157,15 @@ mod tests {
     fn escapes_and_multibyte_chars_take_no_extra_columns() {
         assert_eq!(expand_tabs(b"\x1b[32m+\x1b[0m\tx"), b"\x1b[32m+\x1b[0m   x");
         assert_eq!(expand_tabs("é\tx".as_bytes()), "é   x".as_bytes());
+    }
+
+    #[test]
+    fn scrolling_is_clamped() {
+        let mut view = DiffView::new(Text::from("1\n2\n3\n4\n5"));
+        view.height = 2;
+        view.scroll_down(100);
+        assert_eq!(view.scroll, 3);
+        view.scroll_up(100);
+        assert_eq!(view.scroll, 0);
     }
 }
