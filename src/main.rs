@@ -1,17 +1,8 @@
-//! A small TUI for writing Conventional Commit messages for the working-copy
-//! change in a `jj` repository.
+//! A TUI for writing and revising Conventional Commit descriptions of
+//! changes in a `jj` repository, with the change's diff alongside.
 //!
-//! Message format:
-//!
-//! ```text
-//! type(scope): subject
-//!
-//! Problem:
-//! ...
-//!
-//! Solution:
-//! ...
-//! ```
+//! See `message` for the message format and how existing descriptions are
+//! parsed without being rewritten.
 
 mod app;
 mod diff;
