@@ -98,6 +98,7 @@ pub struct App {
     vim: Vim,
     /// The search being typed after `/` in the diff pane.
     search_prompt: Option<String>,
+    zoomed: bool,
 }
 
 impl App {
@@ -139,6 +140,7 @@ impl App {
             keymap: session.keymap,
             vim: Vim::new(mode),
             search_prompt: None,
+            zoomed: false,
         }
     }
 
@@ -263,6 +265,7 @@ impl App {
             KeyCode::Char('/') => self.search_prompt = Some(String::new()),
             KeyCode::Char('n') => self.diff.next_match(),
             KeyCode::Char('N') => self.diff.prev_match(),
+            KeyCode::Char('z') => self.zoomed = !self.zoomed,
             _ => {}
         }
         None
@@ -524,8 +527,12 @@ impl App {
     fn draw(&mut self, frame: &mut Frame) {
         let [main, status] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
+        // Zoom lasts only while the diff has focus.
+        self.zoomed &= self.focus == Focus::Diff;
         // Side by side when there's room; stacked on narrow terminals.
-        let [diff_area, form_area] = if main.width >= 100 {
+        let [diff_area, form_area] = if self.zoomed {
+            [main, Rect::default()]
+        } else if main.width >= 100 {
             Layout::horizontal([Constraint::Percentage(50); 2]).areas(main)
         } else {
             Layout::vertical([Constraint::Percentage(40), Constraint::Fill(1)]).areas(main)
@@ -552,9 +559,11 @@ impl App {
         );
         self.diff.render(frame, diff_area, block);
 
-        match self.view {
-            View::Structured => self.draw_form(frame, form_area),
-            View::Raw => self.draw_raw(frame, form_area),
+        if !self.zoomed {
+            match self.view {
+                View::Structured => self.draw_form(frame, form_area),
+                View::Raw => self.draw_raw(frame, form_area),
+            }
         }
         frame.render_widget(self.status_line(), status);
     }
@@ -742,6 +751,8 @@ fn header_counter(len: usize) -> Span<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     const EXAMPLE: &str = "fix(parser): handle empty input\n\n\
                            This also corrects an unrelated diagnostic.\n\n\
@@ -995,5 +1006,18 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert_eq!(app.search_prompt, None);
         assert_eq!(app.focus, Focus::Diff);
+    }
+
+    #[test]
+    fn zoom_ends_when_focus_leaves_the_diff() {
+        let mut app = app("", Keymap::Default);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        app.focus_diff();
+        press(&mut app, KeyCode::Char('z'));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(app.zoomed);
+        press(&mut app, KeyCode::Char('l'));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(!app.zoomed);
     }
 }
