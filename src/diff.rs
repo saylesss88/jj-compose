@@ -5,7 +5,7 @@ use std::{error::Error, iter};
 use ansi_to_tui::IntoText;
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph},
@@ -83,6 +83,8 @@ pub struct DiffView {
     pan: u16,
     /// Rows visible inside the pane, updated on every draw.
     height: usize,
+    /// Show the list of files down the left side.
+    show_files: bool,
 }
 
 impl DiffView {
@@ -108,6 +110,7 @@ impl DiffView {
             scroll: 0,
             pan: 0,
             height: 0,
+            show_files: false,
         };
         if files.is_empty() {
             view.rows
@@ -169,7 +172,9 @@ impl DiffView {
     }
 
     pub fn scroll_down(&mut self, n: usize) {
-        self.scroll = self.scroll.saturating_add(n).min(self.max_scroll());
+        // Past a jumps position near the end, don't snap back up.
+        let limit = self.max_scroll().max(self.scroll);
+        self.scroll = self.scroll.saturating_add(n).min(limit);
     }
 
     pub const fn scroll_up(&mut self, n: usize) {
@@ -200,13 +205,84 @@ impl DiffView {
     /// Draw only the visible lines, so a large diff costs the same per
     /// frame as a small one.
     pub fn render(&mut self, frame: &mut Frame, area: Rect, block: Block<'static>) {
-        self.height = usize::from(block.inner(area).height);
-        self.scroll = self.scroll.min(self.max_scroll());
+        let mut inner = block.inner(area);
+        frame.render_widget(block, area);
+        if self.show_files && !self.files.is_empty() {
+            let [list, rest] = Layout::horizontal([
+                Constraint::Length(self.file_list_width(inner)),
+                Constraint::Fill(1),
+            ])
+            .areas(inner);
+            self.render_file_list(frame, list);
+            inner = rest;
+        }
+        self.height = usize::from(inner.height);
+        // Clamp to the last row, not the last full page (see `jump`).
+        self.scroll = self.scroll.min(self.rows.len().saturating_sub(1));
 
         let end = (self.scroll + self.height).min(self.rows.len());
         let visible = self.rows[self.scroll..end].to_vec();
-        let paragraph = Paragraph::new(visible).block(block).scroll((0, self.pan));
-        frame.render_widget(paragraph, area);
+        frame.render_widget(Paragraph::new(visible).scroll((0, self.pan)), inner);
+    }
+
+    /// Wide enough for the longest entry, up to a third of the pane.
+    fn file_list_width(&self, area: Rect) -> u16 {
+        let longest = self.files.iter().map(|f| list_entry(f).width()).max();
+        let wanted = u16::try_from(longest.unwrap_or(0) + 2).unwrap_or(u16::MAX);
+        wanted.min(area.width / 3)
+    }
+
+    /// One row per file with its counts; the file at the top of the diff is
+    /// highlighted and kept in view.
+    fn render_file_list(&self, frame: &mut Frame, area: Rect) {
+        let current = self.current_file().map_or(0, |(n, _)| n - 1);
+        let height = usize::from(area.height);
+        let first = current.saturating_sub(height.saturating_sub(1));
+        let rows: Vec<Line> = self.files[first..]
+            .iter()
+            .take(height)
+            .enumerate()
+            .map(|(i, file)| {
+                let line = list_entry(file);
+                if first + i == current {
+                    line.patch_style(Modifier::REVERSED)
+                } else {
+                    line
+                }
+            })
+            .collect();
+        let block = Block::new()
+            .borders(ratatui::widgets::Borders::RIGHT)
+            .border_style(Color::DarkGray);
+        frame.render_widget(Paragraph::new(rows).block(block), area);
+    }
+
+    pub const fn toggle_file_list(&mut self) {
+        self.show_files = !self.show_files;
+    }
+
+    pub fn next_file(&mut self) {
+        self.jump(first_after(self.files.iter().map(|f| f.row), self.scroll));
+    }
+
+    pub fn prev_file(&mut self) {
+        self.jump(last_before(self.files.iter().map(|f| f.row), self.scroll));
+    }
+
+    pub fn next_hunk(&mut self) {
+        self.jump(first_after(self.hunk_rows.iter().copied(), self.scroll));
+    }
+
+    pub fn prev_hunk(&mut self) {
+        self.jump(last_before(self.hunk_rows.iter().copied(), self.scroll));
+    }
+
+    /// Put `row` at the top of the pane, if there is one, even near the end
+    /// of the diff (like Vim's `zt`), so the file or hunk is what's on top.
+    const fn jump(&mut self, row: Option<usize>) {
+        if let Some(row) = row {
+            self.scroll = row;
+        }
     }
 }
 
@@ -227,6 +303,25 @@ fn file_title(file: &FileDiff) -> Line<'static> {
         ));
     }
     Line::from(spans)
+}
+
+/// The first of `rows` below `top`.
+fn first_after(mut rows: impl Iterator<Item = usize>, top: usize) -> Option<usize> {
+    rows.find(|&row| row > top)
+}
+
+/// The last of `rows` above `top`.
+fn last_before(rows: impl Iterator<Item = usize>, top: usize) -> Option<usize> {
+    rows.take_while(|&row| row < top).last()
+}
+
+/// `path +12 -3` for the file list.
+fn list_entry(file: &FileEntry) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(file.path.clone()),
+        Span::styled(format!(" +{}", file.added), Color::Green),
+        Span::styled(format!(" -{}", file.removed), Color::Red),
+    ])
 }
 
 #[cfg(test)]
@@ -315,5 +410,35 @@ mod tests {
         assert_eq!(view.scroll, 6);
         view.scroll_up(100);
         assert_eq!(view.scroll, 0);
+    }
+
+    #[test]
+    fn jumps_between_files_and_hunks() {
+        let mut view = DiffView::from_output(OUTPUT, "").unwrap();
+        view.height = 2;
+        view.next_hunk();
+        assert_eq!(view.scroll, 1);
+        view.next_file();
+        assert_eq!(view.scroll, 6);
+        view.next_hunk();
+        assert_eq!(view.scroll, 8);
+        view.next_hunk(); // no more hunks: stay put
+        assert_eq!(view.scroll, 8);
+        view.prev_file();
+        assert_eq!(view.scroll, 6);
+        view.prev_hunk();
+        assert_eq!(view.scroll, 1);
+        view.prev_file();
+        assert_eq!(view.scroll, 0);
+    }
+
+    #[test]
+    fn jumping_to_the_last_file_puts_it_on_top() {
+        let mut view = DiffView::from_output(OUTPUT, "").unwrap();
+        view.height = 8; // the second file's title would fit on screen
+        view.next_file();
+        assert_eq!(view.current_file().unwrap().0, 2);
+        view.scroll_down(1); // stays put rather than snapping back up
+        assert_eq!(view.scroll, 6);
     }
 }

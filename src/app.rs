@@ -248,6 +248,11 @@ impl App {
             KeyCode::Char('l' | 'i') | KeyCode::Esc | KeyCode::Enter => {
                 self.focus = Focus::Editor;
             }
+            KeyCode::Char(']') => self.diff.next_file(),
+            KeyCode::Char('[') => self.diff.prev_file(),
+            KeyCode::Char('}') => self.diff.next_hunk(),
+            KeyCode::Char('{') => self.diff.prev_hunk(),
+            KeyCode::Char('f') => self.diff.toggle_file_list(),
             _ => {}
         }
         None
@@ -599,7 +604,7 @@ impl App {
         }
         let keys = match (self.focus, self.keymap, self.vim.mode) {
             (Focus::Diff, ..) => {
-                " j/k scroll · ^d/^u half page · g/G top/bottom · H/L pan · l back · ^s save"
+                " j/k scroll · [/] file · {/} hunk · f files · g/G top/bottom · H/L pan · l back"
             }
             (Focus::Editor, Keymap::Default, _) => {
                 " Tab next · Enter next/newline · Alt-← diff · PgUp/PgDn scroll · ^t raw/form · ^s save · Esc quit"
