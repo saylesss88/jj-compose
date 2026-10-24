@@ -203,6 +203,9 @@ impl App {
             KeyCode::PageUp => self.diff.scroll_up(self.diff.half_page()),
             KeyCode::Down if alt => self.diff.scroll_down(1),
             KeyCode::Up if alt => self.diff.scroll_up(1),
+            // Alt-←/→ jump between the diff and the editor from anywhere.
+            KeyCode::Left if alt => self.focus_diff(),
+            KeyCode::Right if alt => self.focus = Focus::Editor,
             _ => {
                 return match self.focus {
                     Focus::Diff => self.diff_key(key.code, ctrl, confirming),
@@ -224,9 +227,12 @@ impl App {
             KeyCode::Char(' ') => self.diff.scroll_down(self.diff.half_page()),
             KeyCode::Char('g') | KeyCode::Home => self.diff.scroll_to_top(),
             KeyCode::Char('G') | KeyCode::End => self.diff.scroll_to_bottom(),
-            KeyCode::Char('l') | KeyCode::Right => self.diff.pan_right(8),
-            KeyCode::Char('h') | KeyCode::Left => self.diff.pan_left(8),
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i') => self.focus = Focus::Editor,
+            // h/l move between panes, as before; Shift or the arrows pan.
+            KeyCode::Char('L') | KeyCode::Right => self.diff.pan_right(8),
+            KeyCode::Char('H') | KeyCode::Left => self.diff.pan_left(8),
+            KeyCode::Char('l' | 'i') | KeyCode::Esc | KeyCode::Enter => {
+                self.focus = Focus::Editor;
+            }
             _ => {}
         }
         None
@@ -262,6 +268,7 @@ impl App {
                 };
                 match self.vim.handle(&Input::from(key), editor) {
                     vim::Action::Quit => return self.quit(confirming),
+                    vim::Action::FocusDiff => self.focus_diff(),
                     vim::Action::NextField if form => self.focus_field(self.field.next()),
                     vim::Action::PrevField if form => self.focus_field(self.field.prev()),
                     _ => {}
@@ -342,6 +349,14 @@ impl App {
                 None
             }
         }
+    }
+
+    fn focus_diff(&mut self) {
+        self.editor().cancel_selection();
+        if matches!(self.vim.mode, vim::Mode::Visual | vim::Mode::Operator(_)) {
+            self.vim.mode = vim::Mode::Normal;
+        }
+        self.focus = Focus::Diff;
     }
 
     /// Switch between the form and the raw text. Going back to the form only
@@ -504,17 +519,17 @@ impl App {
         }
         let keys = match (self.focus, self.keymap, self.vim.mode) {
             (Focus::Diff, ..) => {
-                " j/k scroll · ^d/^u half page · g/G top/bottom · h/l pan · Esc back · ^s save"
+                " j/k scroll · ^d/^u half page · g/G top/bottom · H/L pan · l back · ^s save"
             }
             (Focus::Editor, Keymap::Default, _) => {
-                " Tab next · Enter next/newline · PgUp/PgDn diff · ^t raw/form · ^s save · Esc quit"
+                " Tab next · Enter next/newline · Alt-← diff · PgUp/PgDn scroll · ^t raw/form · ^s save · Esc quit"
             }
             (Focus::Editor, Keymap::Vim, vim::Mode::Insert) => {
                 " Esc normal · Tab next · Enter next/newline · ^t raw/form · ^s save"
             }
             (Focus::Editor, Keymap::Vim, vim::Mode::Visual) => " d/c/y operate · Esc cancel",
             (Focus::Editor, Keymap::Vim, _) => {
-                " i insert · j/k/Tab fields · ^d/^u diff · ^t raw/form · ^s save · q quit"
+                " i insert · j/k fields · h diff · ^d/^u scroll diff · ^t raw/form · ^s save · q quit"
             }
         };
         let mut spans = Vec::new();
@@ -732,6 +747,31 @@ mod tests {
         assert_eq!((app.focus, app.field), (Focus::Editor, Field::Type));
         press(&mut app, KeyCode::BackTab);
         assert_eq!(app.focus, Focus::Diff);
+    }
+
+    #[test]
+    fn h_and_l_move_between_the_form_and_the_diff() {
+        let mut app = app(EXAMPLE, Keymap::Vim);
+        // `h` moves the cursor until it reaches the start of the line...
+        app.editor().move_cursor(CursorMove::End);
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.focus, Focus::Editor);
+        app.editor().move_cursor(CursorMove::Head);
+        // ...then carries on into the diff; `l` comes back.
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.focus, Focus::Diff);
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!((app.focus, app.field), (Focus::Editor, Field::Type));
+    }
+
+    #[test]
+    fn alt_arrows_jump_to_the_diff_and_back() {
+        let mut app = app("", Keymap::Default);
+        let alt = |code| KeyEvent::new(code, KeyModifiers::ALT);
+        app.handle_key(alt(KeyCode::Left));
+        assert_eq!(app.focus, Focus::Diff);
+        app.handle_key(alt(KeyCode::Right));
+        assert_eq!(app.focus, Focus::Editor);
     }
 
     #[test]

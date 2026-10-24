@@ -31,6 +31,8 @@ pub enum Action {
     Quit,
     NextField,
     PrevField,
+    /// `h` at the start of a line: move focus to the diff pane.
+    FocusDiff,
 }
 
 #[derive(Debug)]
@@ -81,6 +83,11 @@ impl Vim {
             }
             Key::Char('k') | Key::Up if self.mode == Mode::Normal && row == 0 => {
                 return Action::PrevField;
+            }
+            // Likewise `h` at the start of a line carries on into the diff,
+            // which sits to the left.
+            Key::Char('h') | Key::Left if self.mode == Mode::Normal && editor.cursor().1 == 0 => {
+                return Action::FocusDiff;
             }
 
             // Motions (also the targets of a pending operator).
