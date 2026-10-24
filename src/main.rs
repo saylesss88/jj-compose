@@ -184,7 +184,9 @@ impl Draft {
     /// The header plus the optional Problem/Solution body, or the first
     /// reason the header isn't a valid Conventional Commit
     fn build(&self) -> Result<String, &'static str> {
-        let ty = self.get(Field::Type).trim().trim_end_matches('!');
+        let ty = self.get(Field::Type).trim();
+        // Only one `!` is meaningful; `header()` strips exactly one.
+        let ty = ty.strip_suffix('!').map_or(ty, str::trim_end);
         if ty.is_empty() {
             return Err("type is required (feat, fix, refactor, ...)");
         }
@@ -578,5 +580,7 @@ mod tests {
         assert!(draft("feat", "", " ", "", "").build().is_err());
         assert!(draft("new feature", "", "x", "", "").build().is_err());
         assert!(draft("feat", "a b", "x", "", "").build().is_err());
+        assert!(draft("feat!!", "", "x", "", "").build().is_err());
+        assert!(draft("!", "", "x", "", "").build().is_err());
     }
 }
