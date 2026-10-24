@@ -1,7 +1,8 @@
 //! Loading the diff shown next to the form.
 
-use std::{error::Error, process::Command};
+use std::error::Error;
 
+use crate::jj::{Jj, Target};
 use ansi_to_tui::IntoText;
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -17,29 +18,27 @@ pub enum DiffFormat {
     Git,
 }
 
-pub fn load_diff(format: DiffFormat) -> Result<Text<'static>, Box<dyn Error>> {
+pub fn load_diff(
+    jj: &Jj,
+    target: &Target,
+    format: DiffFormat,
+) -> Result<Text<'static>, Box<dyn Error>> {
+    let rev = target.commit_id.as_str();
     let args: &[&str] = match format {
-        DiffFormat::Jj => &["diff", "-r", "@", "--color=always"],
-        DiffFormat::Git => &["diff", "-r", "@", "--git", "--color=never"],
+        DiffFormat::Jj => &["diff", "-r", rev, "--color=always"],
+        DiffFormat::Git => &["diff", "-r", rev, "--git", "--color=never"],
     };
-    let output = Command::new("jj")
-        .args(args)
-        .output()
-        .map_err(|e| format!("failed to run jj: {e}"))?;
+    let stdout = jj.output(args)?;
 
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().into());
-    }
-
-    if output.stdout.iter().all(u8::is_ascii_whitespace) {
-        return Ok(Text::raw("(no changes in @)"));
+    if stdout.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Text::raw(format!("(no changes in {})", target.change_id)));
     }
 
     Ok(match format {
         // Turn the ANSI escape codes into ratatui styles instead of
         // printing them as literal `[38;5;2m` garbage.
-        DiffFormat::Jj => output.stdout.into_text()?,
-        DiffFormat::Git => String::from_utf8_lossy(&output.stdout)
+        DiffFormat::Jj => stdout.into_text()?,
+        DiffFormat::Git => String::from_utf8_lossy(&stdout)
             .lines()
             .map(diff_line)
             .collect(),
