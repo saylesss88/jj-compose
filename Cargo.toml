@@ -7,3 +7,4 @@ edition = "2024"
 ansi-to-tui = "8"
 clap = { version = "4", features = ["derive", "env"] }
 ratatui = "0.30"
+ratatui-textarea = "0.9"

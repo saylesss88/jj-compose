@@ -5,30 +5,31 @@ use std::io;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    layout::{Constraint, Layout, Position, Rect},
-    style::{Color, Style, Stylize},
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
     widgets::{Block, Paragraph},
 };
+use ratatui_textarea::{CursorMove, Input, TextArea, WrapMode};
 
 use crate::message::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT};
 
-/// Where keyboard focus is: the diff pane, or one of the form fields.
+/// Where keyboard focus is: the diff pane, or the current form field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Diff,
-    Field(Field),
+    Editor,
 }
 
-/// Navigating (Normal) or typing (Insert).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Normal,
-    Insert,
+/// A one-shot message for the status bar, cleared by the next key press.
+enum Status {
+    Error(String),
+    /// Quit was requested with unsaved edits; a second quit confirms.
+    ConfirmQuit,
 }
 
 /// How the event loop ended.
-enum Exit {
+pub enum Exit {
     Abort,
     Commit(String),
 }
@@ -39,13 +40,14 @@ pub struct App {
     diff_scroll: u16,
     /// Rows visible inside the diff pane, updated on every draw.
     diff_height: u16,
-    draft: Draft,
+    /// One editor per [`Field`], indexed by `field as usize`.
+    fields: [TextArea<'static>; Field::ALL.len()],
+    /// The form field being edited, or to return to from the diff pane.
+    field: Field,
     focus: Focus,
-    /// Form field to return to when leaving the diff pane.
-    last_field: Field,
-    mode: Mode,
-    /// Shown in the status bar until the next key press
-    error: Option<&'static str>,
+    /// The message the session started with, to detect unsaved edits.
+    original: String,
+    status: Option<Status>,
 }
 
 impl App {
@@ -56,127 +58,187 @@ impl App {
             diff_len,
             diff_scroll: 0,
             diff_height: 0,
-            draft: Draft::default(),
-            focus: Focus::Field(Field::Type),
-            last_field: Field::Type,
-            mode: Mode::Normal,
-            error: None,
+            fields: Field::ALL.map(|field| field_editor(field, "")),
+            field: Field::Type,
+            focus: Focus::Editor,
+            original: String::new(),
+            status: None,
         }
     }
-    /// Returns the finished commit message, or `None` if the user quit.
-    pub fn run(mut self, terminal: &mut DefaultTerminal) -> io::Result<Option<String>> {
+
+    /// Runs until the user commits or quits.
+    pub fn run(mut self, terminal: &mut DefaultTerminal) -> io::Result<Exit> {
         loop {
             terminal.draw(|frame| self.draw(frame))?;
 
-            // Ignore key *release* events (reported on Windows and with the
-            // kitty keyboard protocol), or every keystroke registers twice.
-            if let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-                && let Some(exit) = self.handle_key(key)
-            {
-                return Ok(match exit {
-                    Exit::Abort => None,
-                    Exit::Commit(message) => Some(message),
-                });
+            let exit = match event::read()? {
+                // Ignore key *release* events (reported on Windows and with the
+                // kitty keyboard protocol), or every keystroke registers twice.
+                Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
+                Event::Paste(text) => {
+                    self.paste(&text);
+                    None
+                }
+                _ => None,
+            };
+            if let Some(exit) = exit {
+                return Ok(exit);
             }
         }
     }
+
+    fn draft(&self) -> Draft {
+        let mut draft = Draft::default();
+        for field in Field::ALL {
+            draft.set(field, self.fields[field as usize].lines().join("\n"));
+        }
+        draft
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.draft().render() != self.original
+    }
+
+    const fn editor(&mut self) -> &mut TextArea<'static> {
+        &mut self.fields[self.field as usize]
+    }
+
+    // -----------------------------------------------------------------------
+    // Input
+    // -----------------------------------------------------------------------
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<Exit> {
-        self.error = None;
+        let confirming = matches!(self.status, Some(Status::ConfirmQuit));
+        self.status = None;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        // Global bindings, active in both modes.
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+        // Global bindings, wherever focus is.
         match key.code {
             KeyCode::Char('s') if ctrl => return self.submit(),
-            KeyCode::Char('c') if ctrl => return Some(Exit::Abort),
-            KeyCode::Tab => {
-                self.focus_field(self.current_field().next());
-                return None;
+            KeyCode::Char('c') if ctrl => return self.quit(confirming),
+            KeyCode::Tab => self.cycle_focus(true),
+            KeyCode::BackTab => self.cycle_focus(false),
+            // Read the diff without leaving the field you're typing in.
+            KeyCode::PageDown => self.scroll_down(self.diff_height / 2),
+            KeyCode::PageUp => self.scroll_up(self.diff_height / 2),
+            KeyCode::Down if alt => self.scroll_down(1),
+            KeyCode::Up if alt => self.scroll_up(1),
+            _ => {
+                return match self.focus {
+                    Focus::Diff => {
+                        self.diff_key(key.code, ctrl);
+                        None
+                    }
+                    Focus::Editor => self.editor_key(key, confirming),
+                };
             }
-            KeyCode::BackTab => {
-                self.focus_field(self.current_field().prev());
-                return None;
-            }
-            _ => {}
-        }
-
-        match self.mode {
-            Mode::Normal => return self.normal_key(key.code, ctrl),
-            Mode::Insert => self.insert_key(key.code, ctrl),
-        }
-        None
-    }
-
-    fn normal_key(&mut self, code: KeyCode, ctrl: bool) -> Option<Exit> {
-        match (code, self.focus) {
-            (KeyCode::Char('q'), _) => return Some(Exit::Abort),
-
-            (KeyCode::Char('i' | 'a') | KeyCode::Enter, Focus::Field(_)) => {
-                self.mode = Mode::Insert;
-            }
-
-            (KeyCode::Char('h') | KeyCode::Left, _) => self.focus = Focus::Diff,
-            (KeyCode::Char('l') | KeyCode::Right, _) => self.focus_field(self.last_field),
-
-            (KeyCode::Char('j') | KeyCode::Down, Focus::Diff) => self.scroll_down(1),
-            (KeyCode::Char('k') | KeyCode::Up, Focus::Diff) => self.scroll_up(1),
-            (KeyCode::Char('j') | KeyCode::Down, Focus::Field(f)) => self.focus_field(f.next()),
-            (KeyCode::Char('k') | KeyCode::Up, Focus::Field(f)) => self.focus_field(f.prev()),
-
-            // Diff scrolling works from anywhere so you can read while writing.
-            (KeyCode::Char('d'), _) if ctrl => self.scroll_down(self.diff_height / 2),
-            (KeyCode::Char('u'), _) if ctrl => self.scroll_up(self.diff_height / 2),
-            (KeyCode::Char('g'), _) => self.diff_scroll = 0,
-            (KeyCode::Char('G'), _) => self.diff_scroll = self.max_scroll(),
-            _ => {}
         }
         None
     }
 
-    fn insert_key(&mut self, code: KeyCode, ctrl: bool) {
-        // You can't type into the diff pane; Esc still leaves Insert.
-        let Focus::Field(field) = self.focus else {
-            self.mode = Mode::Normal;
-            return;
-        };
-        let buf = self.draft.get_mut(field);
-
+    fn diff_key(&mut self, code: KeyCode, ctrl: bool) {
         match code {
-            KeyCode::Esc => self.mode = Mode::Normal,
-            // Ctrl+<letter> is a command, not text.
-            KeyCode::Char(c) if !ctrl => buf.push(c),
-            KeyCode::Backspace => {
-                buf.pop();
-            }
-            KeyCode::Enter if field.is_multiline() => buf.push('\n'),
-            // Enter on a one-line field moves on, like a form.
-            KeyCode::Enter => self.focus_field(field.next()),
+            KeyCode::Char('j') | KeyCode::Down => self.scroll_down(1),
+            KeyCode::Char('k') | KeyCode::Up => self.scroll_up(1),
+            KeyCode::Char('d') if ctrl => self.scroll_down(self.diff_height / 2),
+            KeyCode::Char('u') if ctrl => self.scroll_up(self.diff_height / 2),
+            KeyCode::Char(' ') => self.scroll_down(self.diff_height / 2),
+            KeyCode::Char('g') | KeyCode::Home => self.diff_scroll = 0,
+            KeyCode::Char('G') | KeyCode::End => self.diff_scroll = self.max_scroll(),
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i') => self.focus = Focus::Editor,
             _ => {}
         }
+    }
+
+    fn editor_key(&mut self, key: KeyEvent, confirming: bool) -> Option<Exit> {
+        let field = self.field;
+        // Shift+arrows select text, so only bare arrows leave the field.
+        let plain = key.modifiers.is_empty();
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let editor = self.editor();
+        let row = editor.cursor().0;
+        let last_row = editor.lines().len() - 1;
+
+        match key.code {
+            KeyCode::Esc => return self.quit(confirming),
+            // Enter on a one-line field moves on, like a form.
+            KeyCode::Enter if !field.is_multiline() => self.focus_field(field.next()),
+            // Arrowing off the top or bottom of a field moves between fields.
+            KeyCode::Up if plain && row == 0 && field != Field::Type => {
+                self.focus_field(field.prev());
+            }
+            KeyCode::Down if plain && row == last_row && field.next() != field => {
+                self.focus_field(field.next());
+            }
+            KeyCode::Char('z') if ctrl => {
+                editor.undo();
+            }
+            KeyCode::Char('w') if alt => editor.copy(),
+            _ => {
+                editor.input(Input::from(key));
+            }
+        }
+        None
+    }
+
+    /// Bracketed paste: insert the text as-is, instead of replaying it as
+    /// key presses (where every newline would act as Enter).
+    fn paste(&mut self, text: &str) {
+        if self.focus != Focus::Editor {
+            return;
+        }
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let text = if self.field.is_multiline() {
+            text
+        } else {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        self.editor().insert_str(text);
+    }
+
+    /// Quit now if nothing would be lost (or this is the second request).
+    fn quit(&mut self, confirmed: bool) -> Option<Exit> {
+        if confirmed || !self.is_dirty() {
+            return Some(Exit::Abort);
+        }
+        self.status = Some(Status::ConfirmQuit);
+        None
     }
 
     /// Finish with a valid message, or stay open and show why not.
     fn submit(&mut self) -> Option<Exit> {
-        match self.draft.build() {
+        match self.draft().build() {
             Ok(message) => Some(Exit::Commit(message)),
             Err(e) => {
-                self.error = Some(e);
+                self.status = Some(Status::Error(e.into()));
                 None
             }
         }
     }
 
-    /// The field that Tab moves from, or that `l` returns to.
-    const fn current_field(&self) -> Field {
-        match self.focus {
-            Focus::Field(f) => f,
-            Focus::Diff => self.last_field,
+    /// Tab order: every form field, then the diff pane, then around again.
+    fn cycle_focus(&mut self, forward: bool) {
+        let stops = Field::ALL.len() + 1;
+        let current = match self.focus {
+            Focus::Editor => self.field as usize,
+            Focus::Diff => Field::ALL.len(),
+        };
+        let next = if forward {
+            (current + 1) % stops
+        } else {
+            (current + stops - 1) % stops
+        };
+        match Field::ALL.get(next) {
+            Some(&field) => self.focus_field(field),
+            None => self.focus = Focus::Diff,
         }
     }
 
     const fn focus_field(&mut self, field: Field) {
-        self.focus = Focus::Field(field);
-        self.last_field = field;
+        self.focus = Focus::Editor;
+        self.field = field;
     }
 
     /// The last scroll offset that still fills the pane.
@@ -202,109 +264,120 @@ impl App {
     fn draw(&mut self, frame: &mut Frame) {
         let [main, status] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
-        let [diff_area, form_area] =
-            Layout::horizontal([Constraint::Percentage(50); 2]).areas(main);
+        // Side by side when there's room; stacked on narrow terminals.
+        let [diff_area, form_area] = if main.width >= 100 {
+            Layout::horizontal([Constraint::Percentage(50); 2]).areas(main)
+        } else {
+            Layout::vertical([Constraint::Percentage(40), Constraint::Fill(1)]).areas(main)
+        };
 
         // Remember the viewport height for half-page scrolling and clamping.
         self.diff_height = diff_area.height.saturating_sub(2);
+        self.diff_scroll = self.diff_scroll.min(self.max_scroll());
 
         let diff = Paragraph::new(self.diff.clone())
-            .block(self.pane(" Diff (@) ", Focus::Diff))
+            .block(pane(" Diff ".into(), self.focus == Focus::Diff))
             .scroll((self.diff_scroll, 0));
         frame.render_widget(diff, diff_area);
 
-        let field_areas: [Rect; 5] = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Fill(1),
-            Constraint::Fill(1),
-        ])
-        .areas(form_area);
-
-        for (field, area) in Field::ALL.into_iter().zip(field_areas) {
-            let text = self.draft.get(field);
-            let input =
-                Paragraph::new(text).block(self.pane(self.field_title(field), Focus::Field(field)));
-            frame.render_widget(input, area);
-
-            // ratatui hides the cursor unless a frame places it.
-            if self.mode == Mode::Insert && self.focus == Focus::Field(field) {
-                frame.set_cursor_position(cursor_position(area, text));
-            }
-        }
+        self.draw_form(frame, form_area);
         frame.render_widget(self.status_line(), status);
     }
 
-    fn pane<'a>(&self, title: impl Into<Line<'a>>, target: Focus) -> Block<'a> {
-        let style = match (self.focus == target, self.mode) {
-            (false, _) => Style::new().fg(Color::DarkGray),
-            (true, Mode::Normal) => Style::new().fg(Color::Green),
-            (true, Mode::Insert) => Style::new().fg(Color::Yellow),
-        };
-        Block::bordered()
-            .title(title)
-            .border_style(style)
-            .title_style(style)
-    }
-
-    /// The Subject title shows a live length counter for the whole header line.
-    fn field_title(&self, field: Field) -> Line<'static> {
-        let title = format!(" {} ", field.title());
-        if field != Field::Subject {
-            return Line::from(title);
-        }
-
-        let len = self.draft.header().chars().count();
-        let color = match len {
-            0..=HEADER_SOFT_LIMIT => Color::Green,
-            n if n <= HEADER_HARD_LIMIT => Color::Yellow,
-            _ => Color::Red,
-        };
-        Line::from(vec![
-            Span::raw(title),
-            Span::styled(
-                format!("{len}/{HEADER_HARD_LIMIT} "),
-                Style::new().fg(color),
-            ),
+    fn draw_form(&mut self, frame: &mut Frame, area: Rect) {
+        let [top, subject, problem, solution] = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
         ])
+        .areas(area);
+        let [ty, scope] =
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Fill(1)]).areas(top);
+        let areas = [ty, scope, subject, problem, solution];
+
+        let header_len = self.draft().header().chars().count();
+        for (field, area) in Field::ALL.into_iter().zip(areas) {
+            let focused = self.focus == Focus::Editor && self.field == field;
+            let editor = &mut self.fields[field as usize];
+            editor.set_block(pane(field_title(field, header_len), focused));
+            editor.set_cursor_style(if focused {
+                Style::new().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::new()
+            });
+            frame.render_widget(&*editor, area);
+        }
     }
 
-    /// Bottom row: the current mode and the keys that work in it.
+    /// Bottom row: a pending message, or the keys that work right now.
     fn status_line(&self) -> Line<'static> {
-        if let Some(err) = self.error {
-            return Line::from(format!(" ✗ {err}")).red().bold();
+        match &self.status {
+            Some(Status::Error(err)) => return Line::from(format!(" ✗ {err}")).red().bold(),
+            Some(Status::ConfirmQuit) => {
+                return Line::from(
+                    " Unsaved changes. Quit again to discard them, or press any other key to keep editing.",
+                )
+                .yellow()
+                .bold();
+            }
+            None => {}
         }
-        let (mode, keys) = match self.mode {
-            Mode::Normal => (
-                Span::raw(" NORMAL ").black().on_green(),
-                " i edit · j/k move · h/l diff/form · ^d/^u g/G scroll · Tab next · ^s commit · q quit",
-            ),
-            Mode::Insert => (
-                Span::raw(" INSERT ").black().on_yellow(),
-                " Esc normal · Tab next field · Enter newline/next · ^s commit",
-            ),
+        let keys = match self.focus {
+            Focus::Editor => {
+                " Tab next field · Enter next/newline · PgUp/PgDn diff · ^z undo · ^s save · Esc quit"
+            }
+            Focus::Diff => " j/k scroll · ^d/^u half page · g/G top/bottom · Esc back · ^s save",
         };
-        Line::from(vec![mode, Span::raw(keys).dark_gray()])
+        Line::from(Span::raw(keys).dark_gray())
     }
 }
 
-/// Cursor at the end of `text` inside a bordered `area`, clamped to the box.
-fn cursor_position(area: Rect, text: &str) -> Position {
-    let row = text.matches('\n').count();
-    let last_line = text.rsplit('\n').next().unwrap_or_default();
-    let col = Line::raw(last_line).width();
+/// An editor for `field`, pre-filled with `text`, cursor at the end.
+fn field_editor(field: Field, text: &str) -> TextArea<'static> {
+    let mut editor = TextArea::new(text.split('\n').map(str::to_owned).collect());
+    editor.set_placeholder_text(field.placeholder());
+    // The default underlines the cursor line, which is noisy in a form.
+    editor.set_cursor_line_style(Style::new());
+    if field.is_multiline() {
+        editor.set_wrap_mode(WrapMode::WordOrGlyph);
+    }
+    editor.move_cursor(CursorMove::Bottom);
+    editor.move_cursor(CursorMove::End);
+    editor
+}
 
-    // +1 skips the left/top border; the min() keeps it inside the box.
-    let clamp = |offset: usize, start: u16, end: u16| {
-        let offset = u16::try_from(offset).unwrap_or(u16::MAX);
-        start
-            .saturating_add(1)
-            .saturating_add(offset)
-            .min(end.saturating_sub(2))
+/// A bordered pane, highlighted when focused.
+fn pane(title: Line<'static>, focused: bool) -> Block<'static> {
+    let style = if focused {
+        Style::new().fg(Color::Yellow)
+    } else {
+        Style::new().fg(Color::DarkGray)
     };
-    Position::new(
-        clamp(col, area.x, area.right()),
-        clamp(row, area.y, area.bottom()),
+    Block::bordered()
+        .title(title)
+        .border_style(style)
+        .title_style(style)
+}
+
+/// The field's name; Subject also shows a live length counter for the
+/// whole header line.
+fn field_title(field: Field, header_len: usize) -> Line<'static> {
+    let title = format!(" {} ", field.title());
+    if field != Field::Subject {
+        return Line::from(title);
+    }
+    Line::from(vec![Span::raw(title), header_counter(header_len)])
+}
+
+fn header_counter(len: usize) -> Span<'static> {
+    let color = match len {
+        0..=HEADER_SOFT_LIMIT => Color::Green,
+        n if n <= HEADER_HARD_LIMIT => Color::Yellow,
+        _ => Color::Red,
+    };
+    Span::styled(
+        format!("{len}/{HEADER_HARD_LIMIT} "),
+        Style::new().fg(color),
     )
 }

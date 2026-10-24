@@ -18,13 +18,17 @@ mod diff;
 mod jj;
 mod message;
 
-use std::{error::Error, path::PathBuf};
+use std::{error::Error, io, path::PathBuf};
 
 use clap::Parser;
 
-use app::App;
+use app::{App, Exit};
 use diff::{DiffFormat, load_diff};
 use jj::Jj;
+use ratatui::crossterm::{
+    event::{DisableBracketedPaste, EnableBracketedPaste},
+    execute,
+};
 
 /// Write a Conventional Commit description for a jj change.
 #[derive(Debug, Parser)]
@@ -62,19 +66,35 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let diff = load_diff(&jj, &target, format)?;
 
-    // `init` enters raw mode + the alternate screen and installs a panic hook
-    // that restores the terminal, so a panic won't leave the shell garbled.
-    let mut terminal = ratatui::init();
+    let mut terminal = init_terminal()?;
     let result = App::new(diff).run(&mut terminal);
-
-    // Leave raw mode and the alternate screen.
-    ratatui::restore();
+    restore_terminal();
 
     // Run `jj describe` only after the terminal is restored, so its output
     // (and any error) is visible to the user.
-    if let Some(message) = result? {
+    if let Exit::Commit(message) = result? {
         jj.describe(&target, &message)?;
     }
 
     Ok(())
+}
+
+/// Raw mode, the alternate screen, and bracketed paste (so a pasted
+/// paragraph arrives as text, not as a stream of Enter presses).
+fn init_terminal() -> io::Result<ratatui::DefaultTerminal> {
+    // `init` installs a panic hook that restores the terminal; chain ours in
+    // front of it so a panic also turns bracketed paste back off.
+    let terminal = ratatui::init();
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(io::stdout(), DisableBracketedPaste);
+        hook(info);
+    }));
+    execute!(io::stdout(), EnableBracketedPaste)?;
+    Ok(terminal)
+}
+
+fn restore_terminal() {
+    let _ = execute!(io::stdout(), DisableBracketedPaste);
+    ratatui::restore();
 }

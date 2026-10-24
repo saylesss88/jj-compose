@@ -35,6 +35,17 @@ impl Field {
         }
     }
 
+    /// Hint shown in an empty field.
+    pub const fn placeholder(self) -> &'static str {
+        match self {
+            Self::Type => "feat, fix, docs, refactor, …",
+            Self::Scope => "optional",
+            Self::Subject => "imperative summary, no period",
+            Self::Problem => "What is wrong or missing? (optional)",
+            Self::Solution => "How does this change address it? (optional)",
+        }
+    }
+
     pub const fn is_multiline(self) -> bool {
         matches!(self, Self::Problem | Self::Solution)
     }
@@ -61,8 +72,13 @@ impl Draft {
         &self.inputs[field as usize]
     }
 
-    pub const fn get_mut(&mut self, field: Field) -> &mut String {
-        &mut self.inputs[field as usize]
+    pub fn set(&mut self, field: Field, value: String) {
+        self.inputs[field as usize] = value;
+    }
+
+    /// True if every field is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inputs.iter().all(|s| s.trim().is_empty())
     }
 
     /// `type(scope)!: subject`. A trailing `!` on the type marks a breaking
@@ -104,7 +120,17 @@ impl Draft {
             return Err("subject is required");
         }
 
-        let mut message = self.header();
+        Ok(self.render())
+    }
+
+    /// The message as it would be written, without validating it. An
+    /// all-empty draft renders as an empty string.
+    pub fn render(&self) -> String {
+        let mut message = if self.is_empty() {
+            String::new()
+        } else {
+            self.header()
+        };
         for field in [Field::Problem, Field::Solution] {
             let body = self.get(field).trim();
             if !body.is_empty() {
@@ -114,7 +140,7 @@ impl Draft {
                 message.push_str(body);
             }
         }
-        Ok(message)
+        message
     }
 }
 
