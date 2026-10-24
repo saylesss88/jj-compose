@@ -85,6 +85,16 @@ pub struct DiffView {
     height: usize,
     /// Show the list of files down the left side.
     show_files: bool,
+    search: Option<Search>,
+}
+
+/// The last search and where its matches are.
+struct Search {
+    query: String,
+    /// Rows containing the query, in order.
+    rows: Vec<usize>,
+    /// Index into `rows` of the match last jumped to.
+    current: usize,
 }
 
 impl DiffView {
@@ -111,6 +121,7 @@ impl DiffView {
             pan: 0,
             height: 0,
             show_files: false,
+            search: None,
         };
         if files.is_empty() {
             view.rows
@@ -221,7 +232,9 @@ impl DiffView {
         self.scroll = self.scroll.min(self.rows.len().saturating_sub(1));
 
         let end = (self.scroll + self.height).min(self.rows.len());
-        let visible = self.rows[self.scroll..end].to_vec();
+        let visible = (self.scroll..end)
+            .map(|i| self.highlighted(i))
+            .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(visible).scroll((0, self.pan)), inner);
     }
 
@@ -284,6 +297,104 @@ impl DiffView {
             self.scroll = row;
         }
     }
+    /// Find the rows containing `query`, ignoring case unless it has a
+    /// capital letter, and jump to the first at or below the top of the pane.
+    /// Returns the number of matches.
+    pub fn search(&mut self, query: &str) -> usize {
+        if query.is_empty() {
+            self.search = None;
+            return 0;
+        }
+        let ignore_case = !query.chars().any(char::is_uppercase);
+        let needle = if ignore_case {
+            query.to_lowercase()
+        } else {
+            query.to_owned()
+        };
+        let rows: Vec<usize> = (0..self.rows.len())
+            .filter(|&i| {
+                let text = line_text(&self.rows[i]);
+                if ignore_case {
+                    text.to_lowercase()
+                } else {
+                    text
+                }
+                .contains(&needle)
+            })
+            .collect();
+        let count = rows.len();
+        let current = rows.iter().position(|&row| row >= self.scroll).unwrap_or(0);
+        self.search = Some(Search {
+            query: query.to_owned(),
+            rows,
+            current,
+        });
+        self.show_match();
+        count
+    }
+
+    /// Go to the next match, wrapping around at the end.
+    pub fn next_match(&mut self) {
+        if let Some(search) = &mut self.search
+            && !search.rows.is_empty()
+        {
+            search.current = (search.current + 1) % search.rows.len();
+        }
+        self.show_match();
+    }
+
+    /// Go to the previous match, wrapping around at the start.
+    pub fn prev_match(&mut self) {
+        if let Some(search) = &mut self.search
+            && !search.rows.is_empty()
+        {
+            search.current = search
+                .current
+                .checked_sub(1)
+                .unwrap_or(search.rows.len() - 1);
+        }
+        self.show_match();
+    }
+
+    /// The query, the current match (from 1) and the number of matches.
+    #[must_use]
+    pub fn search_status(&self) -> Option<(&str, usize, usize)> {
+        let search = self.search.as_ref()?;
+        let current = if search.rows.is_empty() {
+            0
+        } else {
+            search.current + 1
+        };
+        Some((&search.query, current, search.rows.len()))
+    }
+
+    /// Scroll the current match into view, a third of the way down so the
+    /// lines before it are visible too.
+    fn show_match(&mut self) {
+        if let Some(&row) = self.search.as_ref().and_then(|s| s.rows.get(s.current)) {
+            self.scroll = row.saturating_sub(self.height / 3);
+        }
+    }
+
+    /// Row `i`, with a background if it matches the search; the current
+    /// match is shown reversed.
+    fn highlighted(&self, i: usize) -> Line<'static> {
+        let mut line = self.rows[i].clone();
+        let Some(search) = &self.search else {
+            return line;
+        };
+        let style = match search.rows.binary_search(&i) {
+            Ok(n) if n == search.current => Style::new().add_modifier(Modifier::REVERSED),
+            Ok(_) => Style::new().bg(Color::DarkGray),
+            Err(_) => return line,
+        };
+        // Per span: jj's colors reset at each span, which would undo a
+        // style set on the line as a whole.
+        for span in &mut line.spans {
+            span.style = span.style.patch(style);
+        }
+        line
+    }
 }
 
 /// `path  +12 -3` in bold, with the counts in green and red.
@@ -322,6 +433,13 @@ fn list_entry(file: &FileEntry) -> Line<'static> {
         Span::styled(format!(" +{}", file.added), Color::Green),
         Span::styled(format!(" -{}", file.removed), Color::Red),
     ])
+}
+/// A row's text without its styling.
+fn line_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
 }
 
 #[cfg(test)]
@@ -440,5 +558,25 @@ mod tests {
         assert_eq!(view.current_file().unwrap().0, 2);
         view.scroll_down(1); // stays put rather than snapping back up
         assert_eq!(view.scroll, 6);
+    }
+
+    #[test]
+    fn search_finds_rows_and_wraps() {
+        let mut view = DiffView::from_output(OUTPUT, "").unwrap();
+        view.height = 3;
+        assert_eq!(view.search("B.txt"), 0); // has a capital: exact case
+        assert_eq!(view.search("b.txt"), 1); // no capitals: any case
+        view.scroll_to_top();
+        assert_eq!(view.search("new"), 2); // `+   new`, `new file mode`
+        assert_eq!(view.search_status(), Some(("new", 1, 2)));
+        assert_eq!(view.scroll, 4 - 1);
+        view.next_match();
+        assert_eq!(view.search_status(), Some(("new", 2, 2)));
+        view.next_match();
+        assert_eq!(view.search_status(), Some(("new", 1, 2)));
+        view.prev_match();
+        assert_eq!(view.search_status(), Some(("new", 2, 2)));
+        assert_eq!(view.search(""), 0);
+        assert_eq!(view.search_status(), None);
     }
 }

@@ -96,6 +96,8 @@ pub struct App {
     keymap: Keymap,
     /// Modal state, used only with [`Keymap::Vim`].
     vim: Vim,
+    /// The search being typed after `/` in the diff pane.
+    search_prompt: Option<String>,
 }
 
 impl App {
@@ -136,6 +138,7 @@ impl App {
             status,
             keymap: session.keymap,
             vim: Vim::new(mode),
+            search_prompt: None,
         }
     }
 
@@ -206,6 +209,10 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
 
+        if self.search_prompt.is_some() {
+            return self.search_key(key);
+        }
+
         // Global bindings, wherever focus is.
         match key.code {
             KeyCode::Char('s') if ctrl => return self.submit(),
@@ -253,6 +260,9 @@ impl App {
             KeyCode::Char('}') => self.diff.next_hunk(),
             KeyCode::Char('{') => self.diff.prev_hunk(),
             KeyCode::Char('f') => self.diff.toggle_file_list(),
+            KeyCode::Char('/') => self.search_prompt = Some(String::new()),
+            KeyCode::Char('n') => self.diff.next_match(),
+            KeyCode::Char('N') => self.diff.prev_match(),
             _ => {}
         }
         None
@@ -522,8 +532,22 @@ impl App {
         };
 
         let accent = self.accent();
+
+        // The pane title is built up in pieces: change ID, then the file at the
+        // top (commit 2), then the search (commit 4).
+        let mut title = vec![Span::raw(format!(" Diff {} ", self.change_id))];
+        if let Some((n, file)) = self.diff.current_file() {
+            let count = self.diff.file_count();
+            title.push(Span::raw(format!("· {n}/{count} {} ", file.path)));
+            title.push(Span::styled(format!("+{} ", file.added), Color::Green));
+            title.push(Span::styled(format!("-{} ", file.removed), Color::Red));
+        }
+        if let Some((query, n, count)) = self.diff.search_status() {
+            title.push(Span::raw(format!("· /{query} {n}/{count} ")));
+        }
+
         let block = pane(
-            format!(" Diff {} ", self.change_id).into(),
+            Line::from(title),
             (self.focus == Focus::Diff).then_some(accent),
         );
         self.diff.render(frame, diff_area, block);
@@ -590,6 +614,9 @@ impl App {
 
     /// Bottom row: a pending message, or the keys that work right now.
     fn status_line(&self) -> Line<'static> {
+        if let Some(prompt) = &self.search_prompt {
+            return Line::from(format!("/{prompt}▏"));
+        }
         match &self.status {
             Some(Status::Error(err)) => return Line::from(format!(" ✗ {err}")).red().bold(),
             Some(Status::Info(info)) => return Line::from(format!(" {info}")).cyan(),
@@ -604,7 +631,7 @@ impl App {
         }
         let keys = match (self.focus, self.keymap, self.vim.mode) {
             (Focus::Diff, ..) => {
-                " j/k scroll · [/] file · {/} hunk · f files · g/G top/bottom · H/L pan · l back"
+                " j/k scroll · [/] file · {/} hunk · f files · / search · n/N match · l back"
             }
             (Focus::Editor, Keymap::Default, _) => {
                 " Tab next · Enter next/newline · Alt-← diff · PgUp/PgDn scroll · ^t raw/form · ^s save · Esc quit"
@@ -624,6 +651,30 @@ impl App {
         }
         spans.push(Span::raw(keys).dark_gray());
         Line::from(spans)
+    }
+
+    /// Typing a search: Enter runs it, Esc cancels, Ctrl-c still quits.
+    fn search_key(&mut self, key: KeyEvent) -> Option<Exit> {
+        let prompt = self.search_prompt.as_mut()?;
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.search_prompt = None;
+                return self.quit(false);
+            }
+            KeyCode::Char(c) => prompt.push(c),
+            KeyCode::Backspace => {
+                prompt.pop();
+            }
+            KeyCode::Enter => {
+                let query = self.search_prompt.take().unwrap_or_default();
+                if self.diff.search(&query) == 0 && !query.is_empty() {
+                    self.status = Some(Status::Error(format!("no match for `{query}`")));
+                }
+            }
+            KeyCode::Esc => self.search_prompt = None,
+            _ => {}
+        }
+        None
     }
 }
 
@@ -925,5 +976,24 @@ mod tests {
             press(&mut app, KeyCode::Char('q')),
             Some(Exit::Abort)
         ));
+    }
+
+    #[test]
+    fn search_prompt_types_runs_and_cancels() {
+        let mut app = app(EXAMPLE, Keymap::Default);
+        app.focus_diff();
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "zzz");
+        // While typing, keys go to the prompt, not to Tab or the form.
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.search_prompt.as_deref(), Some("zzz"));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.search_prompt, None);
+        assert!(matches!(app.status, Some(Status::Error(_))));
+
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.search_prompt, None);
+        assert_eq!(app.focus, Focus::Diff);
     }
 }
