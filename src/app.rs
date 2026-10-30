@@ -1011,7 +1011,7 @@ mod tests {
     #[test]
     fn zoom_ends_when_focus_leaves_the_diff() {
         let mut app = app("", Keymap::Default);
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
         app.focus_diff();
         press(&mut app, KeyCode::Char('z'));
         terminal.draw(|frame| app.draw(frame)).unwrap();

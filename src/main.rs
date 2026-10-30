@@ -4,7 +4,7 @@
 //! See `message` for the message format and how existing descriptions are
 //! parsed without being rewritten.
 
-use std::{error::Error, io, path::PathBuf, process::ExitCode};
+use std::{error::Error, io, panic, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use ratatui::crossterm::{
@@ -92,7 +92,7 @@ fn init_terminal() -> io::Result<ratatui::DefaultTerminal> {
     // `init` installs a panic hook that restores the terminal; chain ours in
     // front of it so a panic also turns bracketed paste back off.
     let terminal = ratatui::init();
-    let hook = std::panic::take_hook();
+    let hook = panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = execute!(io::stdout(), DisableBracketedPaste);
         hook(info);
