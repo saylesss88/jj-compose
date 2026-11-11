@@ -64,6 +64,7 @@ jj-compose <revset>     # any single mutable revision
 | `-R, --repository <PATH>` | Repository to operate on, as with `jj -R`.                   |
 | `--keymap <default\|vim>` | Key bindings. Also set by `JJ_COMPOSE_KEYMAP`.               |
 | `--raw`                   | Start in the raw text editor instead of the form.            |
+| `--diff-tool <NAME>`      | Tool `o`/`O` open the diff in. Also `JJ_COMPOSE_DIFF_TOOL`.  |
 
 The revset must resolve to exactly one mutable revision; immutable ones are
 rejected before the TUI opens. It's resolved once, at launch, so `@-` or a
@@ -215,20 +216,49 @@ Insert mode uses the default keymap's editing keys.
 
 ### Diff pane
 
-| Key                          | Action                               |
-| ---------------------------- | ------------------------------------ |
-| `j` / `k`, `↓` / `↑`         | Scroll a line                        |
-| `Ctrl-d` / `Ctrl-u`, `Space` | Half page                            |
-| `g` / `G`, `Home` / `End`    | Top / bottom                         |
-| `]` / `[`                    | Next / previous file                 |
-| `}` / `{`                    | Next / previous hunk                 |
-| `f`                          | Show / hide the file list            |
-| `/`, then `n` / `N`          | Search, next / previous match        |
-| `z`                          | Zoom the diff to the whole window    |
-| `r`                          | Reload the diff                      |
-| `H` / `L`, `←` / `→`         | Pan sideways                         |
-| `l`, `Esc`, `Enter`, `i`     | Back to the editor                   |
-| `q` (Vim keymap)             | Quit (asks again if there are edits) |
+| Key                          | Action                                                       |
+| ---------------------------- | ------------------------------------------------------------ |
+| `j` / `k`, `↓` / `↑`         | Scroll a line                                                |
+| `Ctrl-d` / `Ctrl-u`, `Space` | Half page                                                    |
+| `g` / `G`, `Home` / `End`    | Top / bottom                                                 |
+| `]` / `[`                    | Next / previous file                                         |
+| `}` / `{`                    | Next / previous hunk                                         |
+| `f`                          | Show / hide the file list                                    |
+| `/`, then `n` / `N`          | Search, next / previous match                                |
+| `z`                          | Zoom the diff to the whole window                            |
+| `r`                          | Reload the diff                                              |
+| `H` / `L`, `←` / `→`         | Pan sideways                                                 |
+| `l`, `Esc`, `Enter`, `i`     | Back to the editor                                           |
+| `o` / `O`                    | Open the current file / the whole change in an external tool |
+| `q` (Vim keymap)             | Quit (asks again if there are edits)                         |
+
+---
+
+## External diff tools
+
+`o` opens the file at the top of the pane in another program; `O` opens the
+whole change. Both run `jj diff --tool`, so the tool is whatever `--diff-tool`
+says, and otherwise jj's own `ui.diff-editor`: a working `jj split` setup needs
+no extra configuration here. The status bar names the tool that `o` will use.
+
+`jj diff --tool` takes its arguments from `diff-args`, while `jj split` uses
+`edit-args`, so a tool configured only for splitting needs the one line:
+
+```toml
+# ~/.config/jj/config.toml
+[ui]
+diff-editor = "meld"
+
+[merge-tools.meld]
+program = "meld"
+edit-args = ["--newtab", "$left", "$right"]
+diff-args = ["--newtab", "$left", "$right"]   # for `o`/`O`
+```
+
+A GUI tool returns to the form as soon as you close its window. A terminal tool
+such as `difft` is paged by jj, so quit the pager (`q`) to come back. With no
+tool configured at all, `o` says so rather than opening jj's internal diff,
+which is the one already on screen.
 
 ## License
 
