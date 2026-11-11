@@ -5,25 +5,29 @@ A terminal UI for writing and revising
 [jj](https://jj-vcs.github.io/jj/), with the change's diff alongside.
 
 ```text
-┌ Diff kxqvmzpo ──────────────────┐┌ Type ──────┐┌ Scope ──────────────┐
-│Modified regular file src/app.rs:││fix         ││parser               │
-│  41   41:     let len = ...     │└────────────┘└─────────────────────┘
-│  42     : -   if len == 0 {     │┌ Subject 31/72 ────────────────────┐
-│       42: +   if len < 2 {      ││handle empty input                 │
-│                                 │└───────────────────────────────────┘
-│                                 │┌ Body ─────────────────────────────┐
-│                                 ││This also corrects a diagnostic.   │
-│                                 │└───────────────────────────────────┘
-│                                 │┌ Problem ──────────────────────────┐
-│                                 ││What is wrong or missing?          │
-│                                 │└───────────────────────────────────┘
-│                                 │┌ Solution ─────────────────────────┐
-│                                 ││How does this change address it?   │
-│                                 │└───────────────────────────────────┘
-│                                 │┌ Trailers ─────────────────────────┐
-│                                 ││Fixes #42                          │
-└─────────────────────────────────┘└───────────────────────────────────┘
- Tab next · Enter next/newline · PgUp/PgDn diff · ^t raw/form · ^s save · Esc quit
+┌ Diff xuurlzoz · 1/2 README.md +2 -0 ───────────┐┌ Type ────────────┐┌ Scope ─────────────────────┐
+│README.md  +2 -0                                ││fix               ││parser                      │
+│@@ -1,1 +1,3 @@                                 │└──────────────────┘└────────────────────────────┘
+│ # demo                                         │┌ Subject 31/72 ─────────────────────────────────┐
+│+                                               ││handle empty input                              │
+│+Empty input now parses to no tokens.           │└────────────────────────────────────────────────┘
+│                                                │┌ Body ──────────────────────────────────────────┐
+│src/parser.rs  +1 -1                            ││This also corrects an unrelated diagnostic.     │
+│@@ -1,7 +1,7 @@                                 ││                                                │
+│ pub fn parse(input: &str) -> Vec<Token> {      ││                                                │
+│     let len = input.len();                     │└────────────────────────────────────────────────┘
+│     if len == 0 {                              │┌ Problem ───────────────────────────────────────┐
+│-        panic!("empty input");                 ││ What is wrong or missing? (optional)           │
+│+        return Vec::new();                     ││                                                │
+│     }                                          │└────────────────────────────────────────────────┘
+│     lex(input)                                 │┌ Solution ──────────────────────────────────────┐
+│ }                                              ││ How does this change address it? (optional)    │
+│                                                ││                                                │
+│                                                │└────────────────────────────────────────────────┘
+│                                                │┌ Trailers ──────────────────────────────────────┐
+│                                                ││Fixes #42                                       │
+└────────────────────────────────────────────────┘└────────────────────────────────────────────────┘
+ Tab next · Enter next/newline · Alt-← diff · PgUp/PgDn scroll · ^t raw/form · ^s save · Esc quit
 ```
 
 ## Install
@@ -40,6 +44,12 @@ Add an alias so it runs as `jj compose`:
 compose = ["util", "exec", "--", "jj-compose"]
 ```
 
+To always use the Vim keymap, add it to the alias:
+
+```toml
+compose = ["util", "exec", "--", "jj-compose", "--keymap", "vim"]
+```
+
 ## Usage
 
 ```sh
@@ -48,17 +58,21 @@ jj-compose -r @-        # revise the parent's description
 jj-compose <revset>     # any single mutable revision
 ```
 
-| Option                   | Effect                                                        |
-| ------------------------ | ------------------------------------------------------------- |
+| Option                    | Effect                                                       |
+| ------------------------- | ------------------------------------------------------------ |
 | `-r, --revision <REVSET>` | Revision to describe (or pass it positionally). Default `@`. |
 | `-R, --repository <PATH>` | Repository to operate on, as with `jj -R`.                   |
-| `--git`                  | Show the diff in git format instead of jj's configured one.   |
 | `--keymap <default\|vim>` | Key bindings. Also set by `JJ_COMPOSE_KEYMAP`.               |
-| `--raw`                  | Start in the raw text editor instead of the form.             |
+| `--raw`                   | Start in the raw text editor instead of the form.            |
 
-The revset must resolve to exactly one mutable revision. Saving runs
-`jj describe` on that exact commit; saving a message identical to the
-current one does nothing.
+The revset must resolve to exactly one mutable revision; immutable ones are
+rejected before the TUI opens. It's resolved once, at launch, so `@-` or a
+bookmark can't drift to a different change while you're writing.
+
+Saving runs `jj describe` on that change by its change ID, so it still finds the
+right change if you edit files while jj-compose is open (jj rewrites the commit
+when it snapshots your edits). Saving a message identical to the current one
+does nothing.
 
 ## The message
 
@@ -77,89 +91,144 @@ Fixes #42
 Reviewed-by: Name <email>
 ```
 
-Only the header is required. A `!` at the end of the Type field marks a
-breaking change and is written after the scope. Trailers are the final
-paragraph of `Token: value` or `Token #value` lines (`BREAKING CHANGE:`
-included); they are checked when you save.
+Only the header is required. A `!` at the end of the Type field marks a breaking
+change and is written after the scope. Trailers are the final paragraph of
+`Token: value` or `Token #value` lines (`BREAKING CHANGE:` included); they are
+checked when you save.
 
-The Subject title shows the header's length: green up to 50 characters,
-yellow up to 72, red beyond.
+The Subject title shows the header's length: green up to 50 characters, yellow
+up to 72, red beyond.
 
 ### Revising existing descriptions
 
 On launch the revision's current description is loaded. It opens in the form
 **only if the form can reproduce it byte for byte**; otherwise it opens in the
-raw editor, unchanged, and the status bar says why (for example, the first
-line isn't `type(scope): subject`). Opening and saving a message never
-reshapes it behind your back.
+raw editor, unchanged, and the status bar says why (for example, the first line
+isn't `type(scope): subject`). Opening and saving a message never reshapes it
+behind your back.
 
 `Ctrl-t` switches between the form and the raw text at any time. Switching to
-the form from raw text follows the same rule, so it's refused (with the
-reason) until the text fits. Saving from the raw view writes the text exactly
-as typed, without Conventional Commit validation.
+the form from raw text follows the same rule, so it's refused (with the reason)
+until the text fits. Saving from the raw view writes the text exactly as typed,
+without Conventional Commit validation.
+
+## The diff pane
+
+The diff is shown in git format with jj's colors, so your jj color settings
+apply, but `ui.diff-formatter` does not. Each file starts with a title row
+giving its path and how many lines were added and removed. The pane's title
+shows which file is at the top, how many there are, and the current search.
+
+- **Files and hunks:** `]` / `[` jump to the next / previous file, `}` / `{` to
+  the next / previous hunk. `f` shows a list of every file with its counts down
+  the side of the pane.
+- **Search:** `/` opens a prompt in the status bar; `Enter` jumps to the first
+  match, `n` / `N` move between matches. Searches ignore case unless they
+  contain a capital letter.
+- **Zoom:** `z` gives the diff the whole window, until you move back to the
+  form.
+- **Stale diff:** when you're describing `@`, editing a file that's in the diff
+  (in another terminal or your editor) flags the pane `stale: r to reload`
+  within a second. `r` reloads it and keeps your place and search. New files
+  that weren't in the diff show up on the next reload.
+
+On terminals narrower than 100 columns the diff sits above the form instead of
+beside it, and moving between the two follows the layout on screen.
 
 ## Keys
 
 ### Everywhere
 
-| Key                  | Action                                 |
-| -------------------- | -------------------------------------- |
-| `Ctrl-s`             | Save and run `jj describe`             |
-| `Ctrl-c`             | Quit (asks again if there are edits)   |
-| `Ctrl-t`             | Switch between form and raw text       |
-| `Tab` / `Shift-Tab`  | Next / previous field, then the diff   |
-| `PgDn` / `PgUp`      | Scroll the diff half a page            |
-| `Alt-↓` / `Alt-↑`    | Scroll the diff one line               |
+| Key                 | Action                                |
+| ------------------- | ------------------------------------- |
+| `Ctrl-s`            | Save and run `jj describe`            |
+| `Ctrl-c`            | Quit (asks again if there are edits)  |
+| `Ctrl-t`            | Switch between form and raw text      |
+| `Tab` / `Shift-Tab` | Next / previous field, then the diff  |
+| `Alt-←` / `Alt-→`   | Jump to the diff / back to the editor |
+| `PgDn` / `PgUp`     | Scroll the diff half a page           |
+| `Alt-↓` / `Alt-↑`   | Scroll the diff one line              |
+
+### Moving between boxes
+
+The form is laid out with Type and Scope side by side above Subject, and the
+other fields below. Moving past the edge of a field's text goes to whatever is
+next to it on screen:
+
+```text
+ diff  │  Type  ⇄  Scope          diff (narrow terminals)
+       │      Subject              ──────────────────────
+       │      Body                   Type  ⇄  Scope
+       │      ...                        Subject
+       │      Trailers                   ...
+```
+
+- From Type or Scope, down goes to Subject; up from Subject returns to whichever
+  of the two you left last.
+- The diff is reached by going left from the start of a field, or up from Type
+  or Scope on narrow terminals.
+- Entering a field from the side puts the cursor on the side you came from.
+
+Tab and `Enter` always follow the plain top-to-bottom order.
 
 ### Default keymap
 
 The form opens ready to type in Type.
 
-| Key                         | Action                                        |
-| --------------------------- | --------------------------------------------- |
-| `Enter`                     | Next field (one-line fields) or newline       |
-| `↑` / `↓` at a field's edge | Previous / next field                         |
-| `Esc`                       | Quit (asks again if there are edits)          |
-| `Shift`+arrows              | Select                                        |
-| `Ctrl-x` / `Alt-w` / `Ctrl-y` | Cut / copy / paste (internal clipboard)     |
-| `Ctrl-z` or `Ctrl-u` / `Ctrl-r` | Undo / redo                               |
-| `Ctrl-←` / `Ctrl-→`, `Alt-b` / `Alt-f` | Word left / right                  |
-| `Ctrl-w`, `Alt-Backspace` / `Alt-d` | Delete word before / after            |
-| `Home` / `End`, `Ctrl-a` / `Ctrl-e` | Line start / end                      |
-| `Ctrl-k` / `Ctrl-j`         | Delete to end / start of line                 |
+| Key                                    | Action                                                        |
+| -------------------------------------- | ------------------------------------------------------------- |
+| `Enter`                                | Next field (one-line fields) or newline                       |
+| Arrows at a field's edge               | The field in that direction (←/→ only between Type and Scope) |
+| `Esc`                                  | Quit (asks again if there are edits)                          |
+| `Shift`+arrows                         | Select                                                        |
+| `Ctrl-x` / `Alt-w` / `Ctrl-y`          | Cut / copy / paste (internal clipboard)                       |
+| `Ctrl-z` or `Ctrl-u` / `Ctrl-r`        | Undo / redo                                                   |
+| `Ctrl-←` / `Ctrl-→`, `Alt-b` / `Alt-f` | Word left / right                                             |
+| `Ctrl-w`, `Alt-Backspace` / `Alt-d`    | Delete word before / after                                    |
+| `Home` / `End`, `Ctrl-a` / `Ctrl-e`    | Line start / end                                              |
+| `Ctrl-k` / `Ctrl-j`                    | Delete to end / start of line                                 |
 
-Pasting from the terminal inserts text as-is; in one-line fields newlines
-become spaces.
+The arrow keys never move you into the diff, so holding one down can't leave the
+form; use `Alt-←` or Tab for that.
+
+Pasting from the terminal inserts text as-is; in one-line fields newlines become
+spaces.
 
 ### Vim keymap
 
 `--keymap vim` or `JJ_COMPOSE_KEYMAP=vim`. Starts in Insert mode for a new
-description, Normal mode when revising one. Insert mode uses the default
-keymap's editing keys.
+description and Normal mode when revising one; the status bar shows the mode.
+Insert mode uses the default keymap's editing keys.
 
-| Key                               | Action                                     |
-| --------------------------------- | ------------------------------------------ |
-| `h` `j` `k` `l`, `w` `b` `e`, `0` `^` `$`, `gg` `G` | Motions                |
-| `j` / `k` on a field's last / first line, `Enter` | Next / previous field      |
-| `i` `a` `I` `A` `o` `O`            | Insert                                     |
-| `x` `D` `C` `S` `J`                | Edit                                       |
-| `d` `c` `y` + motion, `dd` `cc` `yy`, `p` `P` | Operators and paste             |
-| `v` / `V`                          | Visual / visual line                       |
-| `u` / `Ctrl-r`                     | Undo / redo                                |
-| `Ctrl-d` / `Ctrl-u`, `Ctrl-e` / `Ctrl-y` | Scroll the diff                      |
-| `q`                                | Quit (asks again if there are edits)       |
+| Key                                                 | Action                                |
+| --------------------------------------------------- | ------------------------------------- |
+| `h` `j` `k` `l`, `w` `b` `e`, `0` `^` `$`, `gg` `G` | Motions                               |
+| `h` `j` `k` `l` past the edge of a field's text     | The box in that direction (see above) |
+| `Enter`                                             | Next field                            |
+| `i` `a` `I` `A` `o` `O`                             | Insert                                |
+| `x` `D` `C` `S` `J`                                 | Edit                                  |
+| `d` `c` `y` + motion, `dd` `cc` `yy`, `p` `P`       | Operators and paste                   |
+| `v` / `V`                                           | Visual / visual line                  |
+| `u` / `Ctrl-r`                                      | Undo / redo                           |
+| `Ctrl-d` / `Ctrl-u`, `Ctrl-e` / `Ctrl-y`            | Scroll the diff                       |
+| `q`                                                 | Quit (asks again if there are edits)  |
 
 ### Diff pane
 
-| Key                         | Action             |
-| --------------------------- | ------------------ |
-| `j` / `k`, `↓` / `↑`        | Scroll a line      |
-| `Ctrl-d` / `Ctrl-u`, `Space` | Half page         |
-| `g` / `G`, `Home` / `End`   | Top / bottom       |
-| `h` / `l`, `←` / `→`        | Pan sideways       |
-| `Esc`, `Enter`, `i`         | Back to the editor |
-
-On terminals narrower than 100 columns the diff sits above the form.
+| Key                          | Action                               |
+| ---------------------------- | ------------------------------------ |
+| `j` / `k`, `↓` / `↑`         | Scroll a line                        |
+| `Ctrl-d` / `Ctrl-u`, `Space` | Half page                            |
+| `g` / `G`, `Home` / `End`    | Top / bottom                         |
+| `]` / `[`                    | Next / previous file                 |
+| `}` / `{`                    | Next / previous hunk                 |
+| `f`                          | Show / hide the file list            |
+| `/`, then `n` / `N`          | Search, next / previous match        |
+| `z`                          | Zoom the diff to the whole window    |
+| `r`                          | Reload the diff                      |
+| `H` / `L`, `←` / `→`         | Pan sideways                         |
+| `l`, `Esc`, `Enter`, `i`     | Back to the editor                   |
+| `q` (Vim keymap)             | Quit (asks again if there are edits) |
 
 ## License
 
