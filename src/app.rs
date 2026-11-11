@@ -18,6 +18,9 @@ use crate::{
     vim::{self, Dir, Vim},
 };
 
+/// Terminal width below which the diff goes above the form.
+const SIDE_BY_SIDE_MIN_WIDTH: u16 = 100;
+
 /// Which key bindings the editor uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Keymap {
@@ -99,6 +102,8 @@ pub struct App {
     /// The search being typed after `/` in the diff pane.
     search_prompt: Option<String>,
     zoomed: bool,
+    /// The last draw put the diff above the form rather than beside it.
+    stacked: bool,
 }
 
 impl App {
@@ -141,6 +146,7 @@ impl App {
             vim: Vim::new(mode),
             search_prompt: None,
             zoomed: false,
+            stacked: false,
         }
     }
 
@@ -465,15 +471,19 @@ impl App {
     fn neighbor(&self, dir: Dir) -> Option<Stop> {
         use Field::{Scope, Subject, Trailers, Type};
         if self.view == View::Raw {
-            return (dir == Dir::Left).then_some(Stop::Diff);
+            let toward_diff = if self.stacked { Dir::Up } else { Dir::Left };
+            return (dir == toward_diff).then_some(Stop::Diff);
         }
         let field = match (dir, self.field) {
-            (Dir::Up, Type | Scope) | (Dir::Down, Trailers) => {
-                return None;
-            }
+            // On a narrow terminal the diff sits above Type and Scope...
+            (Dir::Up, Type | Scope) => return self.stacked.then_some(Stop::Diff),
             (Dir::Right, _) if self.field != Type => return None,
-            (Dir::Left, f) if f != Scope => return Some(Stop::Diff),
+            (Dir::Down, Trailers) => return None,
+            (Dir::Right, f) if f != Type => return None,
+            // ...otherwise it's to the left of every field but Scope.
+            (Dir::Left, f) if f != Scope => return (!self.stacked).then_some(Stop::Diff),
             (Dir::Up, Subject) => self.top_field,
+            (Dir::Left, f) if f != Scope => return Some(Stop::Diff),
             (Dir::Down, Type | Scope) => Subject,
             (Dir::Left, _) => Type,
             (Dir::Right, _) => Scope,
@@ -529,6 +539,7 @@ impl App {
             Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
         // Zoom lasts only while the diff has focus.
         self.zoomed &= self.focus == Focus::Diff;
+        self.stacked = main.width < SIDE_BY_SIDE_MIN_WIDTH;
         // Side by side when there's room; stacked on narrow terminals.
         let [diff_area, form_area] = if self.zoomed {
             [main, Rect::default()]
@@ -1018,5 +1029,31 @@ mod tests {
         press(&mut app, KeyCode::Char('l'));
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert!(!app.zoomed);
+    }
+
+    #[test]
+    fn vim_k_reaches_the_diff_when_it_is_above_the_form() {
+        let mut app = app("", Keymap::Vim);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(app.stacked);
+        press(&mut app, KeyCode::Esc);
+
+        // h at the start of Type no longer leads anywhere...
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!((app.focus, app.field), (Focus::Editor, Field::Type));
+        // ...k from the top row does, from Scope too.
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.focus, Focus::Diff);
+
+        // Raw view: k on the first line.
+        press(&mut app, KeyCode::Esc);
+        ctrl(&mut app, 't');
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.focus, Focus::Editor);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.focus, Focus::Diff);
     }
 }
