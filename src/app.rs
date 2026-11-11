@@ -752,7 +752,6 @@ fn header_counter(len: usize) -> Span<'static> {
 mod tests {
     use super::*;
     use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
 
     const EXAMPLE: &str = "fix(parser): handle empty input\n\n\
                            This also corrects an unrelated diagnostic.\n\n\
