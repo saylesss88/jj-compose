@@ -1,6 +1,6 @@
 //! The diff pane: loading `jj diff` output and scrolling through it.
 
-use std::{error::Error, iter};
+use std::{error::Error, iter, ops::Range};
 
 use ansi_to_tui::IntoText;
 use ratatui::{
@@ -13,7 +13,7 @@ use ratatui::{
 
 use crate::{
     jj::{Jj, Target},
-    patch::{self, FileDiff},
+    patch::{self, FileDiff, HunkId, Patch},
 };
 
 /// Columns a tab advances to. Terminal tab stops are every 8 columns, but
@@ -72,12 +72,24 @@ fn expand_tabs(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// One hunk's place on screen and in the patch.
+#[derive(Debug, Clone)]
+pub struct HunkEntry {
+    pub id: HunkId,
+    /// Path of the file it belongs to.
+    pub path: String,
+    /// Rows it occupies, header line first.
+    pub rows: Range<usize>,
+}
+
 /// The diff text plus its scroll position.
 pub struct DiffView {
     rows: Vec<Line<'static>>,
     files: Vec<FileEntry>,
-    /// Row of every hunk header, in order.
-    hunk_rows: Vec<usize>,
+    /// Every hunk, in order.
+    hunks: Vec<HunkEntry>,
+    /// The diff as text, for building a patch of chosen hunks.
+    patch: Patch,
     scroll: usize,
     /// Columns scrolled to the right, for long lines.
     pan: u16,
@@ -111,31 +123,50 @@ impl DiffView {
             .lines()
             .map(str::to_owned)
             .collect();
-        let files = patch::parse(&plain);
+        let patch = Patch::new(plain);
 
         let mut view = Self {
             rows: Vec::new(),
             files: Vec::new(),
-            hunk_rows: Vec::new(),
+            hunks: Vec::new(),
+            patch: patch.clone(),
             scroll: 0,
             pan: 0,
             height: 0,
             show_files: false,
             search: None,
         };
-        if files.is_empty() {
+        if patch.files().is_empty() {
             view.rows
                 .push(Line::raw(empty.to_owned()).style(Color::DarkGray));
         }
-        for file in &files {
-            view.push_file(file, &styled, &plain);
+        for (i, file) in patch.files().iter().enumerate() {
+            view.push_file(i, file, &styled, &patch);
         }
         Ok(view)
     }
 
+    /// The parsed diff, for building a patch of chosen hunks.
+    #[must_use]
+    pub const fn patch(&self) -> &Patch {
+        &self.patch
+    }
+
+    /// Every hunk, in the order they appear.
+    #[must_use]
+    pub fn hunks(&self) -> &[HunkEntry] {
+        &self.hunks
+    }
+
     /// A title row with the path and counts, any header lines that say
     /// something (new, deleted, renamed, binary), then the hunks.
-    fn push_file(&mut self, file: &FileDiff, styled: &[Line<'static>], plain: &[String]) {
+    fn push_file(
+        &mut self,
+        index: usize,
+        file: &FileDiff,
+        styled: &[Line<'static>],
+        patch: &Patch,
+    ) {
         if !self.rows.is_empty() {
             self.rows.push(Line::default()); // blank line between files
         }
@@ -151,14 +182,22 @@ impl DiffView {
         for i in file.header.clone() {
             // The path and counts are already in the title.
             let noise = ["diff --git ", "index ", "--- ", "+++ "];
-            if !noise.iter().any(|p| plain[i].starts_with(p)) {
+            if !noise.iter().any(|p| patch.line(i).starts_with(p)) {
                 self.rows.push(line(i).style(Color::DarkGray));
             }
         }
-        for hunk in &file.hunks {
-            self.hunk_rows.push(self.rows.len());
+        for (h, hunk) in file.hunks.iter().enumerate() {
+            let start = self.rows.len();
             self.rows.push(line(hunk.header));
             self.rows.extend(hunk.lines.clone().map(line));
+            self.hunks.push(HunkEntry {
+                id: HunkId {
+                    file: index,
+                    hunk: h,
+                },
+                path: file.path.clone(),
+                rows: start..self.rows.len(),
+            });
         }
     }
 
@@ -215,7 +254,7 @@ impl DiffView {
 
     /// Draw only the visible lines, so a large diff costs the same per
     /// frame as a small one.
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, block: Block<'static>) {
+    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, block: Block<'static>) {
         let mut inner = block.inner(area);
         frame.render_widget(block, area);
         if self.show_files && !self.files.is_empty() {
@@ -247,11 +286,11 @@ impl DiffView {
 
     /// One row per file with its counts; the file at the top of the diff is
     /// highlighted and kept in view.
-    fn render_file_list(&self, frame: &mut Frame, area: Rect) {
+    fn render_file_list(&self, frame: &mut Frame<'_>, area: Rect) {
         let current = self.current_file().map_or(0, |(n, _)| n - 1);
         let height = usize::from(area.height);
         let first = current.saturating_sub(height.saturating_sub(1));
-        let rows: Vec<Line> = self.files[first..]
+        let rows: Vec<Line<'_>> = self.files[first..]
             .iter()
             .take(height)
             .enumerate()
@@ -283,11 +322,48 @@ impl DiffView {
     }
 
     pub fn next_hunk(&mut self) {
-        self.jump(first_after(self.hunk_rows.iter().copied(), self.scroll));
+        self.jump(first_after(
+            self.hunks.iter().map(|h| h.rows.start),
+            self.scroll,
+        ));
     }
 
     pub fn prev_hunk(&mut self) {
-        self.jump(last_before(self.hunk_rows.iter().copied(), self.scroll));
+        self.jump(last_before(
+            self.hunks.iter().map(|h| h.rows.start),
+            self.scroll,
+        ));
+    }
+
+    /// Draw one hunk on its own, filling the pane: the whole of the view
+    /// while a split is being chosen.
+    pub fn render_hunk(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        block: Block<'static>,
+        at: usize,
+    ) {
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        self.height = usize::from(inner.height);
+        let Some(hunk) = self.hunks.get(at) else {
+            return;
+        };
+        // Scrolling applies within the hunk, so a long one is still readable.
+        self.scroll = self.scroll.clamp(hunk.rows.start, hunk.rows.end);
+        let end = (self.scroll + self.height).min(hunk.rows.end);
+        let visible = (self.scroll..end)
+            .map(|i| self.highlighted(i))
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(visible).scroll((0, self.pan)), inner);
+    }
+
+    /// Put the hunk at `at` at the top of the pane.
+    pub fn show_hunk(&mut self, at: usize) {
+        if let Some(hunk) = self.hunks.get(at) {
+            self.scroll = hunk.rows.start;
+        }
     }
 
     /// Put `row` at the top of the pane, if there is one, even near the end
@@ -498,7 +574,8 @@ mod tests {
             ]
         );
         assert_eq!(view.files.iter().map(|f| f.row).collect::<Vec<_>>(), [0, 6]);
-        assert_eq!(view.hunk_rows, [1, 8]);
+        let starts: Vec<usize> = view.hunks.iter().map(|h| h.rows.start).collect();
+        assert_eq!(starts, [1, 8]);
     }
 
     #[test]
