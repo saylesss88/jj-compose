@@ -9,4 +9,5 @@ pub mod diff;
 pub mod jj;
 pub mod message;
 pub mod patch;
+pub mod split;
 pub mod vim;

@@ -4,7 +4,12 @@
 //! See `message` for the message format and how existing descriptions are
 //! parsed without being rewritten.
 
-use std::{error::Error, io, panic, path::PathBuf, process::ExitCode};
+use std::{
+    error::Error,
+    fs, io, panic,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use clap::Parser;
 use ratatui::crossterm::{
@@ -15,6 +20,7 @@ use ratatui::crossterm::{
 use jj_compose::app::{App, Exit, Keymap, Session};
 use jj_compose::diff;
 use jj_compose::jj::Jj;
+use jj_compose::split;
 
 /// Write a Conventional Commit description for a jj change.
 #[derive(Debug, Parser)]
@@ -43,6 +49,10 @@ struct Args {
     /// Tool `o`/`O` opens the diff in [default: jj's ui.diff-editor]
     #[arg(long, value_name = "NAME", env = "JJ_COMPOSE_DIFF_TOOL")]
     diff_tool: Option<String>,
+
+    /// Internal: run as jj's diff editor, keeping only the hunks in PATCH.
+    #[arg(long, num_args = 3, value_names = ["PATCH", "LEFT", "RIGHT"], hide = true)]
+    apply_hunks: Option<Vec<String>>,
 }
 
 fn main() -> ExitCode {
@@ -57,6 +67,16 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Args) -> Result<(), Box<dyn Error>> {
+    // Not a session at all: jj ran us as its diff editor mid-split.
+    if let Some(parts) = &args.apply_hunks {
+        let [patch, left, right] = parts.as_slice() else {
+            return Err("--apply-hunks takes a patch and two directories".into());
+        };
+        let text = fs::read_to_string(patch)?;
+        split::apply_selection(&text, Path::new(left), Path::new(right))?;
+        return Ok(());
+    }
+
     let revset = args.revset.or(args.revision).unwrap_or_else(|| "@".into());
     let jj = Jj::new(args.repository);
 
@@ -75,12 +95,14 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     };
 
     let mut terminal = init_terminal()?;
-    let result = App::new(diff, session).run(&mut terminal, &jj, &target);
+    let result = App::new(diff, session, target).run(&mut terminal, &jj);
     restore_terminal();
 
     // Run `jj describe` only after the terminal is restored, so its output
-    // (and any error) is visible to the user.
-    if let Exit::Commit(message) = result? {
+    // (and any error) is visible to the user. A split may have moved the
+    // session on to a different revision, so use the one it ended on.
+    let (exit, target) = result?;
+    if let Exit::Commit(message) = exit {
         if message == description.trim_end() {
             eprintln!("Description of {} unchanged.", target.change_id);
         } else {
