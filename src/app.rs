@@ -1,10 +1,17 @@
 //! Application state, input handling and rendering.
 
-use std::io;
+use std::io::{self, Write};
 
 use ratatui::{
     DefaultTerminal, Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    crossterm::{
+        event::{
+            self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent,
+            KeyEventKind, KeyModifiers,
+        },
+        execute,
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    },
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
@@ -14,6 +21,7 @@ use ratatui_textarea::{CursorMove, Input, TextArea, WrapMode};
 
 use crate::{
     diff::DiffView,
+    jj::{Jj, Target},
     message::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT},
     vim::{self, Dir, Vim},
 };
@@ -49,6 +57,8 @@ pub struct Session {
     pub keymap: Keymap,
     /// Open the raw editor even if the description fits the form.
     pub raw: bool,
+    /// Tool `o`/`O` opens the diff in; `None` disables them, with a hint.
+    pub diff_tool: Option<String>,
 }
 
 /// Somewhere focus can move to.
@@ -80,6 +90,14 @@ pub enum Exit {
     Commit(String),
 }
 
+/// Something a key press asks for that needs the real terminal and `jj`,
+/// so the event loop does it rather than the key handler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Request {
+    /// Show the diff outside the TUI: one file, or the whole change.
+    OpenDiff { path: Option<String> },
+}
+
 pub struct App {
     diff: DiffView,
     change_id: String,
@@ -104,6 +122,9 @@ pub struct App {
     zoomed: bool,
     /// The last draw put the diff above the form rather than beside it.
     stacked: bool,
+    diff_tool: Option<String>,
+    /// Set by a key press, carried out by [`App::run`] before the next draw.
+    pending: Option<Request>,
 }
 
 impl App {
@@ -147,6 +168,8 @@ impl App {
             search_prompt: None,
             zoomed: false,
             stacked: false,
+            diff_tool: session.diff_tool,
+            pending: None,
         }
     }
 
@@ -155,7 +178,12 @@ impl App {
     ///
     /// Returns an [`io::Error`] if drawing the UI frame to the terminal fails, or
     /// if reading the underlying terminal events (such as keystrokes) fails.
-    pub fn run(mut self, terminal: &mut DefaultTerminal) -> io::Result<Exit> {
+    pub fn run(
+        mut self,
+        terminal: &mut DefaultTerminal,
+        jj: &Jj,
+        target: &Target,
+    ) -> io::Result<Exit> {
         loop {
             terminal.draw(|frame| self.draw(frame))?;
 
@@ -172,7 +200,50 @@ impl App {
             if let Some(exit) = exit {
                 return Ok(exit);
             }
+            if let Some(request) = self.pending.take() {
+                self.perform(terminal, jj, target, &request)?;
+            }
         }
+    }
+
+    /// Carry out a [`Request`] with the TUI out of the way.
+    fn perform(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        jj: &Jj,
+        target: &Target,
+        request: &Request,
+    ) -> io::Result<()> {
+        match request {
+            Request::OpenDiff { path } => {
+                // With no tool there is nothing to open but jj's own diff,
+                // which is the one already on screen; say so instead.
+                let Some(tool) = self.diff_tool.clone() else {
+                    self.status = Some(Status::Error(
+                        "no diff tool: set ui.diff-editor in your jj config, or pass --diff-tool"
+                            .into(),
+                    ));
+                    return Ok(());
+                };
+                let result = suspend(terminal, || {
+                    // A GUI tool can take a moment to appear, and the screen
+                    // is blank until it does.
+                    println!("Opening {tool}...");
+                    let result = jj.show_diff(target, &tool, path.as_deref());
+                    // jj pages a terminal tool's output and a GUI holds its
+                    // own window, so only a failure needs the screen held:
+                    // its message would otherwise vanish with the redraw.
+                    if result.is_err() {
+                        wait_for_key("Press Enter to return to jj-compose ");
+                    }
+                    result.map_err(|e| e.to_string())
+                })?;
+                if let Err(e) = result {
+                    self.status = Some(Status::Error(e));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn draft(&self) -> Draft {
@@ -272,6 +343,12 @@ impl App {
             KeyCode::Char('n') => self.diff.next_match(),
             KeyCode::Char('N') => self.diff.prev_match(),
             KeyCode::Char('z') => self.zoomed = !self.zoomed,
+            // The file at the top of the pane, or the whole change.
+            KeyCode::Char('o') => {
+                let path = self.diff.current_file().map(|(_, file)| file.path.clone());
+                self.pending = Some(Request::OpenDiff { path });
+            }
+            KeyCode::Char('O') => self.pending = Some(Request::OpenDiff { path: None }),
             _ => {}
         }
         None
@@ -650,18 +727,24 @@ impl App {
             None => {}
         }
         let keys = match (self.focus, self.keymap, self.vim.mode) {
+            // Name the tool, so `o` says what it will actually open.
             (Focus::Diff, ..) => {
-                " j/k scroll · [/] file · {/} hunk · f files · / search · n/N match · l back"
+                let open = self.diff_tool.as_deref().unwrap_or("open");
+                format!(
+                    " j/k scroll · [/] file · {{/}} hunk · f files · / search · z zoom · o/O {open} · l back"
+                )
             }
             (Focus::Editor, Keymap::Default, _) => {
-                " Tab next · Enter next/newline · Alt-← diff · PgUp/PgDn scroll · ^t raw/form · ^s save · Esc quit"
+                " Tab next · Enter next/newline · Alt-← diff · PgUp/PgDn scroll · ^t raw/form · ^s save · Esc quit".to_owned()
             }
             (Focus::Editor, Keymap::Vim, vim::Mode::Insert) => {
-                " Esc normal · Tab next · Enter next/newline · ^t raw/form · ^s save"
+                " Esc normal · Tab next · Enter next/newline · ^t raw/form · ^s save".to_owned()
             }
-            (Focus::Editor, Keymap::Vim, vim::Mode::Visual) => " d/c/y operate · Esc cancel",
+            (Focus::Editor, Keymap::Vim, vim::Mode::Visual) => {
+                " d/c/y operate · Esc cancel".to_owned()
+            }
             (Focus::Editor, Keymap::Vim, _) => {
-                " i insert · hjkl past an edge: next box · ^d/^u scroll diff · ^t raw/form · ^s save · q quit"
+                " i insert · hjkl past an edge: next box · ^d/^u scroll diff · ^t raw/form · ^s save · q quit".to_owned()
             }
         };
         let mut spans = Vec::new();
@@ -696,6 +779,26 @@ impl App {
         }
         None
     }
+}
+
+/// Run `f` with the terminal handed back to the shell (cooked mode, main
+/// screen), then take it over again and redraw from scratch.
+fn suspend<T>(terminal: &mut DefaultTerminal, f: impl FnOnce() -> T) -> io::Result<T> {
+    disable_raw_mode()?;
+    execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen)?;
+    let out = f();
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+    // ratatui only redraws cells it thinks changed; after another program
+    // has used the screen, everything has.
+    terminal.clear()?;
+    Ok(out)
+}
+
+fn wait_for_key(prompt: &str) {
+    print!("\n{prompt}");
+    let _ = io::stdout().flush();
+    let _ = io::stdin().read_line(&mut String::new());
 }
 
 const fn cursor_style(focused: bool) -> Style {
@@ -769,6 +872,10 @@ mod tests {
                            Fixes #42\nReviewed-by: Someone\n";
 
     fn app(description: &str, keymap: Keymap) -> App {
+        app_with_tool(description, keymap, None)
+    }
+
+    fn app_with_tool(description: &str, keymap: Keymap, diff_tool: Option<&str>) -> App {
         App::new(
             DiffView::from_output(b"", "diff").unwrap(),
             Session {
@@ -776,6 +883,7 @@ mod tests {
                 change_id: "abc".into(),
                 keymap,
                 raw: false,
+                diff_tool: diff_tool.map(str::to_owned),
             },
         )
     }
@@ -1016,6 +1124,43 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert_eq!(app.search_prompt, None);
         assert_eq!(app.focus, Focus::Diff);
+    }
+
+    #[test]
+    fn o_asks_for_the_file_on_top_and_shift_o_for_the_whole_change() {
+        const DIFF: &[u8] = b"diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut app = app("", Keymap::Default);
+        app.diff = DiffView::from_output(DIFF, "").unwrap();
+
+        // In a field, `o` is just a letter.
+        press(&mut app, KeyCode::Char('o'));
+        assert_eq!(app.pending, None);
+
+        app.focus_diff();
+        press(&mut app, KeyCode::Char('o'));
+        let path = Some("a.rs".to_owned());
+        assert_eq!(app.pending.take(), Some(Request::OpenDiff { path }));
+        press(&mut app, KeyCode::Char('O'));
+        assert_eq!(app.pending, Some(Request::OpenDiff { path: None }));
+    }
+
+    #[test]
+    fn the_diff_hint_names_the_configured_tool() {
+        let hint = |tool| {
+            let mut app = app_with_tool("", Keymap::Default, tool);
+            app.focus_diff();
+            app.status_line()
+                .spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        };
+        assert!(
+            hint(Some("meld")).contains("o/O meld"),
+            "{}",
+            hint(Some("meld"))
+        );
+        assert!(hint(None).contains("o/O open"));
     }
 
     #[test]

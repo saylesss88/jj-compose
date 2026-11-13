@@ -39,6 +39,10 @@ struct Args {
     /// Start in the raw message editor instead of the form
     #[arg(long)]
     raw: bool,
+
+    /// Tool `o`/`O` opens the diff in [default: jj's ui.diff-editor]
+    #[arg(long, value_name = "NAME", env = "JJ_COMPOSE_DIFF_TOOL")]
+    diff_tool: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -67,10 +71,11 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         change_id: target.change_id.clone(),
         keymap: args.keymap,
         raw: args.raw,
+        diff_tool: args.diff_tool.or_else(|| diff_tool(&jj)),
     };
 
     let mut terminal = init_terminal()?;
-    let result = App::new(diff, session).run(&mut terminal);
+    let result = App::new(diff, session).run(&mut terminal, &jj, &target);
     restore_terminal();
 
     // Run `jj describe` only after the terminal is restored, so its output
@@ -84,6 +89,17 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+/// The tool `o` opens the diff in, when `--diff-tool` wasn't given: jj's
+/// own configured diff editor, so a working `jj split` setup works here too.
+///
+/// jj's built-in editors (`:builtin`, `:none`) aren't external programs, and
+/// a list-valued `ui.diff-editor` isn't a tool name, so both are ignored.
+fn diff_tool(jj: &Jj) -> Option<String> {
+    let name = jj.config_get("ui.diff-editor")?;
+    let plain = !name.starts_with([':', '[']);
+    plain.then_some(name)
 }
 
 /// Raw mode, the alternate screen, and bracketed paste (so a pasted
