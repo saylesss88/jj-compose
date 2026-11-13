@@ -1,6 +1,10 @@
 //! Application state, input handling and rendering.
 
-use std::io::{self, Write};
+use std::{
+    fs,
+    io::{self, Write},
+    process,
+};
 
 use ratatui::{
     DefaultTerminal, Frame,
@@ -20,14 +24,12 @@ use ratatui::{
 use ratatui_textarea::{CursorMove, Input, TextArea, WrapMode};
 
 use crate::{
-    diff::DiffView,
+    diff::{self, DiffView, HunkEntry},
     jj::{Jj, Target},
     message::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT},
+    patch::HunkId,
     vim::{self, Dir, Vim},
 };
-
-/// Terminal width below which the diff goes above the form.
-const SIDE_BY_SIDE_MIN_WIDTH: u16 = 100;
 
 /// Which key bindings the editor uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -96,6 +98,81 @@ pub enum Exit {
 pub enum Request {
     /// Show the diff outside the TUI: one file, or the whole change.
     OpenDiff { path: Option<String> },
+    /// Commit the hunks chosen in split mode, described by `message`.
+    Split { message: String },
+}
+
+/// Walking the diff one hunk at a time, choosing what goes in this commit.
+///
+/// The hunks are decided in order, like `git add -p`: each is either added
+/// to the commit being written or left for what remains of the change.
+#[derive(Debug, Clone)]
+struct Split {
+    /// Every hunk in the diff, in the order they appear.
+    ids: Vec<HunkId>,
+    /// The file each hunk belongs to, for "the rest of this file".
+    paths: Vec<String>,
+    /// The hunk being decided; past the end once they all have been.
+    at: usize,
+    /// Whether each hunk was added, parallel to `ids`.
+    chosen: Vec<bool>,
+}
+
+impl Split {
+    /// `None` when there is nothing to split: a single hunk would leave one
+    /// of the two commits empty whichever way it went.
+    fn new(hunks: &[HunkEntry]) -> Option<Self> {
+        (hunks.len() > 1).then(|| Self {
+            ids: hunks.iter().map(|h| h.id).collect(),
+            paths: hunks.iter().map(|h| h.path.clone()).collect(),
+            at: 0,
+            chosen: vec![false; hunks.len()],
+        })
+    }
+
+    const fn done(&self) -> bool {
+        self.at >= self.ids.len()
+    }
+
+    fn decide(&mut self, add: bool) {
+        if let Some(slot) = self.chosen.get_mut(self.at) {
+            *slot = add;
+            self.at += 1;
+        }
+    }
+
+    /// Decide this hunk and every later one in the same file alike.
+    fn decide_file(&mut self, add: bool) {
+        let Some(path) = self.paths.get(self.at).cloned() else {
+            return;
+        };
+        while self.paths.get(self.at).is_some_and(|p| *p == path) {
+            self.decide(add);
+        }
+    }
+
+    /// Go back to the previous hunk to decide it again.
+    const fn back(&mut self) {
+        self.at = self.at.saturating_sub(1);
+    }
+
+    fn picked(&self) -> Vec<HunkId> {
+        self.ids
+            .iter()
+            .zip(&self.chosen)
+            .filter(|&(_, add)| *add)
+            .map(|(&id, _)| id)
+            .collect()
+    }
+
+    fn count(&self) -> usize {
+        self.chosen.iter().filter(|&&add| add).count()
+    }
+
+    /// Whether every hunk was added, which is a description, not a split.
+    fn is_everything(&self) -> bool {
+        self.count() == self.ids.len()
+    }
 }
 
 pub struct App {
@@ -120,16 +197,18 @@ pub struct App {
     /// The search being typed after `/` in the diff pane.
     search_prompt: Option<String>,
     zoomed: bool,
-    /// The last draw put the diff above the form rather than beside it.
-    stacked: bool,
     diff_tool: Option<String>,
     /// Set by a key press, carried out by [`App::run`] before the next draw.
     pending: Option<Request>,
+    /// The revision being described, which a split replaces.
+    target: Target,
+    /// The split being composed, if any.
+    split: Option<Split>,
 }
 
 impl App {
     #[must_use]
-    pub fn new(diff: DiffView, session: Session) -> Self {
+    pub fn new(diff: DiffView, session: Session, target: Target) -> Self {
         let original = session.description.trim_end().to_owned();
 
         // Open the form only if it can represent the description exactly;
@@ -167,9 +246,10 @@ impl App {
             vim: Vim::new(mode),
             search_prompt: None,
             zoomed: false,
-            stacked: false,
             diff_tool: session.diff_tool,
             pending: None,
+            target,
+            split: None,
         }
     }
 
@@ -178,12 +258,7 @@ impl App {
     ///
     /// Returns an [`io::Error`] if drawing the UI frame to the terminal fails, or
     /// if reading the underlying terminal events (such as keystrokes) fails.
-    pub fn run(
-        mut self,
-        terminal: &mut DefaultTerminal,
-        jj: &Jj,
-        target: &Target,
-    ) -> io::Result<Exit> {
+    pub fn run(mut self, terminal: &mut DefaultTerminal, jj: &Jj) -> io::Result<(Exit, Target)> {
         loop {
             terminal.draw(|frame| self.draw(frame))?;
 
@@ -198,12 +273,151 @@ impl App {
                 _ => None,
             };
             if let Some(exit) = exit {
-                return Ok(exit);
+                // The target changes when a split happens, so the caller is
+                // told which revision the message is for.
+                return Ok((exit, self.target));
             }
             if let Some(request) = self.pending.take() {
-                self.perform(terminal, jj, target, &request)?;
+                self.perform(terminal, jj, &request)?;
             }
         }
+    }
+
+    /// Commit the chosen hunks and carry on with what is left.
+    ///
+    /// Nothing is taken from the UI until `jj split` has succeeded, so a
+    /// failure leaves the choice intact to try again.
+    fn run_split(&mut self, jj: &Jj, message: &str) -> Result<(), String> {
+        let Some(split) = self.split.as_ref() else {
+            return Ok(());
+        };
+        let added = split.count();
+        let text = self.diff.patch().subset(&split.picked());
+
+        // jj runs jj-compose as its diff editor and passes it this patch.
+        let path = std::env::temp_dir().join(format!("jj-compose-{}.patch", process::id()));
+        fs::write(&path, text).map_err(|e| format!("couldn't write the patch: {e}"))?;
+        let exe = std::env::current_exe().map_err(|e| format!("couldn't find jj-compose: {e}"))?;
+        let result = jj.split(&self.target, message, &path, &exe);
+        let _ = fs::remove_file(&path);
+        result.map_err(|e| e.to_string())?;
+
+        let left = self.reload(jj)?;
+        self.status = Some(Status::Info(format!(
+            "Committed {added} {}. {left} {} left to describe.",
+            plural(added, "hunk"),
+            plural(left, "hunk"),
+        )));
+        Ok(())
+    }
+
+    /// Move to what is left of the change after a split, and start again on
+    /// it: new diff, the description jj carried over, and a fresh split.
+    fn reload(&mut self, jj: &Jj) -> Result<usize, String> {
+        // The hunks that were split off keep the old change ID; the
+        // remainder is a new change, and the only child of that commit.
+        let remainder = format!("{}+", self.target.change);
+        self.target = jj.resolve(&remainder).map_err(|e| e.to_string())?;
+        self.change_id = self.target.change_id.clone();
+        self.diff = diff::load(jj, &self.target).map_err(|e| e.to_string())?;
+
+        let description = jj.description(&self.target).map_err(|e| e.to_string())?;
+        let original = description.trim_end().to_owned();
+        let (draft, view) = Draft::parse(&original).map_or_else(
+            |_| (Draft::default(), View::Raw),
+            |draft| (draft, View::Structured),
+        );
+        self.fields = Field::ALL.map(|field| field_editor(field, draft.get(field)));
+        self.raw = raw_editor(&original);
+        self.view = view;
+        self.original = original;
+        self.field = Field::Type;
+        self.split = Split::new(self.diff.hunks());
+        self.focus = Focus::Editor;
+        self.zoomed = false;
+        Ok(self.diff.hunks().len())
+    }
+
+    /// Start choosing hunks for a commit, showing the first on its own.
+    fn start_split(&mut self) {
+        match Split::new(self.diff.hunks()) {
+            Some(split) => {
+                self.split = Some(split);
+                self.diff.show_hunk(0);
+                self.focus = Focus::Diff;
+                self.zoomed = true;
+            }
+            None => {
+                self.status = Some(Status::Error(
+                    "nothing to split: this change has fewer than two hunks".into(),
+                ));
+            }
+        }
+    }
+
+    fn cancel_split(&mut self) {
+        self.split = None;
+        self.zoomed = false;
+        self.focus = Focus::Editor;
+        self.status = Some(Status::Info("Left split mode.".into()));
+    }
+
+    /// Every hunk decided: go write the message for the ones added.
+    fn finish_choosing(&mut self) {
+        let added = self.split.as_ref().map_or(0, Split::count);
+        self.zoomed = false;
+        self.focus = Focus::Editor;
+        self.status = Some(Status::Info(format!(
+            "{added} {} added. Write the message, then ^s to commit them.",
+            plural(added, "hunk")
+        )));
+    }
+
+    /// Deciding one hunk at a time: add it, skip it, or move around.
+    fn split_key(&mut self, code: KeyCode, ctrl: bool) -> Option<Exit> {
+        // Scrolling, for a hunk taller than the pane.
+        match code {
+            KeyCode::Char('d') if ctrl => {
+                self.diff.scroll_down(self.diff.half_page());
+                return None;
+            }
+            KeyCode::Char('u') if ctrl => {
+                self.diff.scroll_up(self.diff.half_page());
+                return None;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.diff.scroll_down(1);
+                return None;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.diff.scroll_up(1);
+                return None;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.cancel_split();
+                return None;
+            }
+            _ => {}
+        }
+
+        let split = self.split.as_mut()?;
+        match code {
+            KeyCode::Char('y' | ' ') => split.decide(true),
+            KeyCode::Char('n') => split.decide(false),
+            KeyCode::Char('a') => split.decide_file(true),
+            KeyCode::Char('d') => split.decide_file(false),
+            KeyCode::Char('u') | KeyCode::Backspace => split.back(),
+            // Stop here and describe what has been added so far.
+            KeyCode::Enter => split.at = split.ids.len(),
+            _ => return None,
+        }
+
+        if self.split.as_ref().is_some_and(Split::done) {
+            self.finish_choosing();
+        } else if let Some(at) = self.split.as_ref().map(|s| s.at) {
+            self.diff.show_hunk(at);
+        }
+        None
     }
 
     /// Carry out a [`Request`] with the TUI out of the way.
@@ -211,10 +425,14 @@ impl App {
         &mut self,
         terminal: &mut DefaultTerminal,
         jj: &Jj,
-        target: &Target,
         request: &Request,
     ) -> io::Result<()> {
         match request {
+            Request::Split { message } => {
+                if let Err(e) = self.run_split(jj, message) {
+                    self.status = Some(Status::Error(e));
+                }
+            }
             Request::OpenDiff { path } => {
                 // With no tool there is nothing to open but jj's own diff,
                 // which is the one already on screen; say so instead.
@@ -225,11 +443,12 @@ impl App {
                     ));
                     return Ok(());
                 };
+                let target = self.target.clone();
                 let result = suspend(terminal, || {
                     // A GUI tool can take a moment to appear, and the screen
                     // is blank until it does.
                     println!("Opening {tool}...");
-                    let result = jj.show_diff(target, &tool, path.as_deref());
+                    let result = jj.show_diff(&target, &tool, path.as_deref());
                     // jj pages a terminal tool's output and a GUI holds its
                     // own window, so only a failure needs the screen held:
                     // its message would otherwise vanish with the redraw.
@@ -295,6 +514,7 @@ impl App {
         // Global bindings, wherever focus is.
         match key.code {
             KeyCode::Char('s') if ctrl => return self.submit(),
+            KeyCode::Char('s') if alt => self.start_split(),
             KeyCode::Char('c') if ctrl => return self.quit(confirming),
             KeyCode::Char('t') if ctrl => self.toggle_view(),
             KeyCode::Tab => self.cycle_focus(true),
@@ -309,6 +529,10 @@ impl App {
             KeyCode::Right if alt => self.focus = Focus::Editor,
             _ => {
                 return match self.focus {
+                    // Split mode takes over the diff pane's keys.
+                    Focus::Diff if self.split.as_ref().is_some_and(|s| !s.done()) => {
+                        self.split_key(key.code, ctrl)
+                    }
                     Focus::Diff => self.diff_key(key.code, ctrl, confirming),
                     Focus::Editor if self.keymap == Keymap::Vim => self.vim_key(key, confirming),
                     Focus::Editor => self.editor_key(key, confirming),
@@ -349,6 +573,7 @@ impl App {
                 self.pending = Some(Request::OpenDiff { path });
             }
             KeyCode::Char('O') => self.pending = Some(Request::OpenDiff { path: None }),
+            KeyCode::Char('s') => self.start_split(),
             _ => {}
         }
         None
@@ -464,17 +689,33 @@ impl App {
 
     /// Finish with a valid message, or stay open and show why not.
     fn submit(&mut self) -> Option<Exit> {
-        if self.view == View::Raw {
-            // Raw text is the escape hatch: written exactly as typed.
-            return Some(Exit::Commit(self.message()));
-        }
-        match self.draft().build() {
-            Ok(message) => Some(Exit::Commit(message)),
-            Err(e) => {
-                self.status = Some(Status::Error(e.into()));
-                None
+        // Raw text is the escape hatch: written exactly as typed.
+        let message = if self.view == View::Raw {
+            self.message()
+        } else {
+            match self.draft().build() {
+                Ok(message) => message,
+                Err(e) => {
+                    self.status = Some(Status::Error(e.into()));
+                    return None;
+                }
+            }
+        };
+        if let Some(split) = &self.split {
+            if split.count() == 0 {
+                self.status = Some(Status::Error(
+                    "no hunks added: y adds the one on screen, Esc leaves split mode".into(),
+                ));
+                return None;
+            }
+            // Adding every hunk describes the change instead of splitting
+            // it, which is what jj would do anyway with nothing left over.
+            if !split.is_everything() {
+                self.pending = Some(Request::Split { message });
+                return None;
             }
         }
+        Some(Exit::Commit(message))
     }
 
     fn focus_diff(&mut self) {
@@ -548,19 +789,15 @@ impl App {
     fn neighbor(&self, dir: Dir) -> Option<Stop> {
         use Field::{Scope, Subject, Trailers, Type};
         if self.view == View::Raw {
-            let toward_diff = if self.stacked { Dir::Up } else { Dir::Left };
-            return (dir == toward_diff).then_some(Stop::Diff);
+            return (dir == Dir::Left).then_some(Stop::Diff);
         }
         let field = match (dir, self.field) {
-            // On a narrow terminal the diff sits above Type and Scope...
-            (Dir::Up, Type | Scope) => return self.stacked.then_some(Stop::Diff),
+            (Dir::Up, Type | Scope) | (Dir::Down, Trailers) => {
+                return None;
+            }
             (Dir::Right, _) if self.field != Type => return None,
-            (Dir::Down, Trailers) => return None,
-            (Dir::Right, f) if f != Type => return None,
-            // ...otherwise it's to the left of every field but Scope.
-            (Dir::Left, f) if f != Scope => return (!self.stacked).then_some(Stop::Diff),
-            (Dir::Up, Subject) => self.top_field,
             (Dir::Left, f) if f != Scope => return Some(Stop::Diff),
+            (Dir::Up, Subject) => self.top_field,
             (Dir::Down, Type | Scope) => Subject,
             (Dir::Left, _) => Type,
             (Dir::Right, _) => Scope,
@@ -611,12 +848,11 @@ impl App {
     // Rendering
     // -----------------------------------------------------------------------
 
-    fn draw(&mut self, frame: &mut Frame) {
+    fn draw(&mut self, frame: &mut Frame<'_>) {
         let [main, status] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
         // Zoom lasts only while the diff has focus.
         self.zoomed &= self.focus == Focus::Diff;
-        self.stacked = main.width < SIDE_BY_SIDE_MIN_WIDTH;
         // Side by side when there's room; stacked on narrow terminals.
         let [diff_area, form_area] = if self.zoomed {
             [main, Rect::default()]
@@ -627,6 +863,29 @@ impl App {
         };
 
         let accent = self.accent();
+
+        // While splitting, the pane is one hunk and a tally, not the diff.
+        let splitting = match &self.split {
+            Some(split) if !split.done() => Some((
+                split.at,
+                split.ids.len(),
+                split.paths[split.at].clone(),
+                split.count(),
+            )),
+            _ => None,
+        };
+        if let Some((at, total, path, added)) = splitting {
+            let title = Line::from(vec![
+                Span::raw(format!(" Split {} ", self.change_id)),
+                Span::raw(format!("· hunk {}/{total} ", at + 1)),
+                Span::raw(format!("· {path} ")),
+                Span::styled(format!("· {added} added "), Color::Green),
+            ]);
+            let block = pane(title, Some(accent));
+            self.diff.render_hunk(frame, diff_area, block, at);
+            frame.render_widget(self.status_line(), status);
+            return;
+        }
 
         // The pane title is built up in pieces: change ID, then the file at the
         // top (commit 2), then the search (commit 4).
@@ -656,7 +915,7 @@ impl App {
         frame.render_widget(self.status_line(), status);
     }
 
-    fn draw_form(&mut self, frame: &mut Frame, area: Rect) {
+    fn draw_form(&mut self, frame: &mut Frame<'_>, area: Rect) {
         // Trailers are usually a line or two; give the room to the prose.
         let trailer_rows = self.fields[Field::Trailers as usize].lines().len();
         let trailer_height = u16::try_from(trailer_rows.clamp(1, 4)).unwrap_or(4) + 2;
@@ -687,7 +946,7 @@ impl App {
         }
     }
 
-    fn draw_raw(&mut self, frame: &mut Frame, area: Rect) {
+    fn draw_raw(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let header_len = self.raw.lines()[0].chars().count();
         let title = Line::from(vec![
             Span::raw(" Message (raw) "),
@@ -726,16 +985,21 @@ impl App {
             }
             None => {}
         }
+        if self.split.as_ref().is_some_and(|s| !s.done()) {
+            let keys =
+                " y add · n skip · a rest of file · d skip file · u back · Enter done · Esc leave";
+            return Line::from(vec![Span::raw(keys).dark_gray()]);
+        }
         let keys = match (self.focus, self.keymap, self.vim.mode) {
             // Name the tool, so `o` says what it will actually open.
             (Focus::Diff, ..) => {
                 let open = self.diff_tool.as_deref().unwrap_or("open");
                 format!(
-                    " j/k scroll · [/] file · {{/}} hunk · f files · / search · z zoom · o/O {open} · l back"
+                    " j/k scroll · [/] file · {{/}} hunk · f files · / search · z zoom · s split · o/O {open} · l back"
                 )
             }
             (Focus::Editor, Keymap::Default, _) => {
-                " Tab next · Enter next/newline · Alt-← diff · PgUp/PgDn scroll · ^t raw/form · ^s save · Esc quit".to_owned()
+                " Tab next · Enter next/newline · Alt-← diff · Alt-s split · ^t raw/form · ^s save · Esc quit".to_owned()
             }
             (Focus::Editor, Keymap::Vim, vim::Mode::Insert) => {
                 " Esc normal · Tab next · Enter next/newline · ^t raw/form · ^s save".to_owned()
@@ -862,6 +1126,15 @@ fn header_counter(len: usize) -> Span<'static> {
     )
 }
 
+/// `n` with `word` pluralised the easy way.
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        word.to_owned()
+    } else {
+        format!("{word}s")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -885,11 +1158,20 @@ mod tests {
                 raw: false,
                 diff_tool: diff_tool.map(str::to_owned),
             },
+            Target {
+                commit_id: "0123456789abcdef".into(),
+                change: "zzzzzzzzzzzzzzzz".into(),
+                change_id: "zzzzzzzz".into(),
+            },
         )
     }
 
     fn press(app: &mut App, code: KeyCode) -> Option<Exit> {
         app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn alt(app: &mut App, c: char) -> Option<Exit> {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT))
     }
 
     fn ctrl(app: &mut App, c: char) -> Option<Exit> {
@@ -1144,6 +1426,185 @@ mod tests {
         assert_eq!(app.pending, Some(Request::OpenDiff { path: None }));
     }
 
+    /// Two files, three hunks: enough to split more than one way.
+    const THREE_HUNKS: &[u8] = b"\
+diff --git a/a.rs b/a.rs
+index 1111111..2222222 100644
+--- a/a.rs
++++ b/a.rs
+@@ -1,1 +1,1 @@
+-one
++ONE
+@@ -5,1 +5,1 @@
+-five
++FIVE
+diff --git a/b.rs b/b.rs
+index 3333333..4444444 100644
+--- a/b.rs
++++ b/b.rs
+@@ -1,1 +1,1 @@
+-x
++X
+";
+
+    fn splitting_app() -> App {
+        let mut app = app("", Keymap::Default);
+        app.diff = DiffView::from_output(THREE_HUNKS, "").unwrap();
+        app
+    }
+
+    #[test]
+    fn alt_s_starts_choosing_hunks_from_the_first() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        let split = app.split.as_ref().expect("split mode");
+        assert_eq!(split.ids.len(), 3);
+        assert_eq!(split.at, 0);
+        assert_eq!(app.focus, Focus::Diff);
+        assert!(app.zoomed, "one hunk fills the pane");
+    }
+
+    /// `Ctrl-x` is the text editor's cut; splitting must not steal it.
+    #[test]
+    fn ctrl_x_still_belongs_to_the_editor() {
+        let mut app = splitting_app();
+        ctrl(&mut app, 'x');
+        assert!(app.split.is_none());
+    }
+
+    #[test]
+    fn a_change_with_one_hunk_cannot_be_split() {
+        let one = b"diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut app = app("", Keymap::Default);
+        app.diff = DiffView::from_output(one, "").unwrap();
+        alt(&mut app, 's');
+        assert!(app.split.is_none());
+        assert!(matches!(app.status, Some(Status::Error(_))));
+    }
+
+    #[test]
+    fn y_adds_a_hunk_and_n_leaves_it_behind() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('y'));
+        press(&mut app, KeyCode::Char('n'));
+        let split = app.split.as_ref().unwrap();
+        assert_eq!(split.chosen, [true, false, false]);
+        assert_eq!(split.at, 2);
+        assert_eq!(split.count(), 1);
+    }
+
+    #[test]
+    fn u_goes_back_to_change_a_decision() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('y'));
+        press(&mut app, KeyCode::Char('u'));
+        press(&mut app, KeyCode::Char('n'));
+        let split = app.split.as_ref().unwrap();
+        assert!(!split.chosen[0], "the decision was replaced");
+        assert_eq!(split.at, 1);
+    }
+
+    #[test]
+    fn a_decides_the_rest_of_the_file_at_once() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('a'));
+        let split = app.split.as_ref().unwrap();
+        // Both of a.rs's hunks, and not b.rs's.
+        assert_eq!(split.chosen, [true, true, false]);
+        assert_eq!(split.at, 2, "stopped at the next file");
+    }
+
+    #[test]
+    fn deciding_every_hunk_moves_on_to_the_message() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('y'));
+        }
+        assert!(app.split.as_ref().unwrap().done());
+        assert_eq!(app.focus, Focus::Editor);
+        assert!(!app.zoomed);
+    }
+
+    #[test]
+    fn esc_leaves_split_mode_without_choosing() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Esc);
+        assert!(app.split.is_none());
+        assert_eq!(app.focus, Focus::Editor);
+    }
+
+    #[test]
+    fn saving_with_no_hunks_added_explains_itself_instead() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Enter); // done deciding, nothing added
+        type_str(&mut app, "feat");
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        type_str(&mut app, "something");
+        assert!(ctrl(&mut app, 's').is_none());
+        assert!(app.pending.is_none(), "no split was requested");
+        assert!(matches!(app.status, Some(Status::Error(_))));
+    }
+
+    #[test]
+    fn saving_some_hunks_asks_for_a_split() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('y'));
+        press(&mut app, KeyCode::Enter);
+        type_str(&mut app, "feat");
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        type_str(&mut app, "only the first hunk");
+        assert!(ctrl(&mut app, 's').is_none(), "the app stays open");
+        let Some(Request::Split { message }) = app.pending.take() else {
+            panic!("expected a split request, got {:?}", app.pending);
+        };
+        assert!(
+            message.starts_with("feat: only the first hunk"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn adding_every_hunk_just_describes_the_change() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('y'));
+        }
+        type_str(&mut app, "feat");
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        type_str(&mut app, "all of it");
+        let exit = ctrl(&mut app, 's');
+        assert!(matches!(exit, Some(Exit::Commit(_))));
+        assert!(
+            app.pending.is_none(),
+            "splitting off everything is a describe"
+        );
+    }
+
+    #[test]
+    fn the_chosen_hunks_make_a_patch_of_only_themselves() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('n')); // a.rs first hunk: no
+        press(&mut app, KeyCode::Char('y')); // a.rs second hunk: yes
+        press(&mut app, KeyCode::Char('n')); // b.rs: no
+        let picked = app.split.as_ref().unwrap().picked();
+        let text = app.diff.patch().subset(&picked);
+        assert!(text.contains("+FIVE"), "{text}");
+        assert!(!text.contains("+ONE"), "{text}");
+        assert!(!text.contains("b.rs"), "{text}");
+    }
+
     #[test]
     fn the_diff_hint_names_the_configured_tool() {
         let hint = |tool| {
@@ -1174,31 +1635,5 @@ mod tests {
         press(&mut app, KeyCode::Char('l'));
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert!(!app.zoomed);
-    }
-
-    #[test]
-    fn vim_k_reaches_the_diff_when_it_is_above_the_form() {
-        let mut app = app("", Keymap::Vim);
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(app.stacked);
-        press(&mut app, KeyCode::Esc);
-
-        // h at the start of Type no longer leads anywhere...
-        press(&mut app, KeyCode::Char('h'));
-        assert_eq!((app.focus, app.field), (Focus::Editor, Field::Type));
-        // ...k from the top row does, from Scope too.
-        press(&mut app, KeyCode::Char('l'));
-        press(&mut app, KeyCode::Char('k'));
-        assert_eq!(app.focus, Focus::Diff);
-
-        // Raw view: k on the first line.
-        press(&mut app, KeyCode::Esc);
-        ctrl(&mut app, 't');
-        press(&mut app, KeyCode::Char('h'));
-        assert_eq!(app.focus, Focus::Editor);
-        press(&mut app, KeyCode::Char('k'));
-        assert_eq!(app.focus, Focus::Diff);
     }
 }
