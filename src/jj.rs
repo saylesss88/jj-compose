@@ -7,7 +7,7 @@
 use std::{
     error::Error,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -173,6 +173,41 @@ impl Jj {
         if !status.success() {
             return Err(format!("jj diff failed ({status})").into());
         }
+        Ok(())
+    }
+
+    /// Split `target` in two: the hunks in the patch at `patch` become a
+    /// commit described by `message`, and everything else stays behind in a
+    /// new change.
+    ///
+    /// jj-compose at `exe` runs as jj's diff editor, so what the user chose
+    /// in the TUI is what jj sees. The tool is defined on the command line
+    /// rather than in the user's config, which this must not touch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `jj split` fails, including when the choice would
+    /// leave one of the two commits empty.
+    pub fn split(&self, target: &Target, message: &str, patch: &Path, exe: &Path) -> Result<()> {
+        let program = format!("merge-tools.jj-compose.program={}", exe.display());
+        let edit_args = format!(
+            "merge-tools.jj-compose.edit-args=[\"--apply-hunks\",{},\"$left\",\"$right\"]",
+            patch.display()
+        );
+        self.output(&[
+            "--config",
+            &program,
+            "--config",
+            &edit_args,
+            "split",
+            "-i",
+            "-r",
+            &target.change,
+            "-m",
+            message,
+            "--tool",
+            "jj-compose",
+        ])?;
         Ok(())
     }
 
