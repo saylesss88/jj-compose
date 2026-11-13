@@ -116,6 +116,17 @@ impl Jj {
         })
     }
 
+    /// A jj config value, or `None` if it isn't set.
+    ///
+    /// `jj config get` exits non-zero when the key is missing, so an unset
+    /// key and a broken repo are both simply "no value" here.
+    #[must_use]
+    pub fn config_get(&self, key: &str) -> Option<String> {
+        let stdout = self.output(&["config", "get", key]).ok()?;
+        let value = String::from_utf8(stdout).ok()?.trim().to_owned();
+        (!value.is_empty()).then_some(value)
+    }
+
     /// The current description of `target`.
     ///
     /// # Errors
@@ -134,6 +145,35 @@ impl Jj {
             "description",
         ])?;
         Ok(String::from_utf8(stdout)?)
+    }
+
+    /// Show the diff of `target` in the external `tool`, on the real
+    /// terminal. `path` (relative to the repository root) limits it to one
+    /// file.
+    ///
+    /// Unlike [`Jj::output`], nothing is captured: the child inherits the
+    /// terminal, so a pager or a full-screen tool can run. The caller must
+    /// have suspended the TUI first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `jj` can't be spawned or exits with a failure.
+    pub fn show_diff(&self, target: &Target, tool: &str, path: Option<&str>) -> Result<()> {
+        let mut cmd = self.command();
+        // No `--no-pager`: a terminal tool's output goes through jj's pager,
+        // which is what holds the screen until the user quits it.
+        cmd.args(["diff", "-r", &target.commit_id, "--tool", tool]);
+        if let Some(path) = path {
+            // A bare path would be resolved against the current directory;
+            // `root-file:` anchors it at the repository root, which is what
+            // the paths in the diff are relative to.
+            cmd.arg("--").arg(format!("root-file:{path:?}"));
+        }
+        let status = cmd.status().map_err(|e| format!("failed to run jj: {e}"))?;
+        if !status.success() {
+            return Err(format!("jj diff failed ({status})").into());
+        }
+        Ok(())
     }
 
     /// Set the description of `target`.
