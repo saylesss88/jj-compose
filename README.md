@@ -27,7 +27,7 @@ A terminal UI for writing and revising
 │                                                │┌ Trailers ──────────────────────────────────────┐
 │                                                ││Fixes #42                                       │
 └────────────────────────────────────────────────┘└────────────────────────────────────────────────┘
- Tab next · Enter next/newline · Alt-← diff · PgUp/PgDn scroll · ^t raw/form · ^s save · Esc quit
+ Tab next · Enter next/newline · Alt-← diff · Alt-s split · ^t raw/form · ^s save · Esc quit
 ```
 
 ## Install
@@ -128,6 +128,9 @@ shows which file is at the top, how many there are, and the current search.
   contain a capital letter.
 - **Zoom:** `z` gives the diff the whole window, until you move back to the
   form.
+- **Splitting:** `s` (or `Alt-s` from the form) walks the change one hunk at a
+  time, so each piece can be committed with its own message. See
+  [Splitting a change](#splitting-a-change).
 - **Stale diff:** when you're describing `@`, editing a file that's in the diff
   (in another terminal or your editor) flags the pane `stale: r to reload`
   within a second. `r` reloads it and keeps your place and search. New files
@@ -145,6 +148,7 @@ beside it, and moving between the two follows the layout on screen.
 | `Ctrl-s`            | Save and run `jj describe`            |
 | `Ctrl-c`            | Quit (asks again if there are edits)  |
 | `Ctrl-t`            | Switch between form and raw text      |
+| `Alt-s`             | Start splitting the change            |
 | `Tab` / `Shift-Tab` | Next / previous field, then the diff  |
 | `Alt-←` / `Alt-→`   | Jump to the diff / back to the editor |
 | `PgDn` / `PgUp`     | Scroll the diff half a page           |
@@ -229,10 +233,51 @@ Insert mode uses the default keymap's editing keys.
 | `r`                          | Reload the diff                                              |
 | `H` / `L`, `←` / `→`         | Pan sideways                                                 |
 | `l`, `Esc`, `Enter`, `i`     | Back to the editor                                           |
+| `s`                          | Start splitting the change                                   |
 | `o` / `O`                    | Open the current file / the whole change in an external tool |
 | `q` (Vim keymap)             | Quit (asks again if there are edits)                         |
 
 ---
+
+## Splitting a change
+
+A change that does three things needs three messages. `Alt-s` (or `s` in the
+diff pane) walks the change one hunk at a time, filling the pane with just that
+hunk and asking whether it belongs in the commit you are about to write:
+
+| Key                            | Action                                     |
+| ------------------------------ | ------------------------------------------ |
+| `y`, `Space`                   | Add this hunk to the commit                |
+| `n`                            | Leave it for what remains of the change    |
+| `a`                            | Add this hunk and the rest of the file     |
+| `d`                            | Skip this hunk and the rest of the file    |
+| `u`, `Backspace`               | Back up and decide the previous hunk again |
+| `Enter`                        | Stop here and describe what has been added |
+| `Esc`, `q`                     | Leave split mode, deciding nothing         |
+| `j` / `k`, `Ctrl-d` / `Ctrl-u` | Scroll inside a hunk taller than the pane  |
+
+The pane's title tracks where you are: `hunk 3/7 · src/app.rs · 2 added`.
+
+Once every hunk is decided the form takes focus again. Write the message for the
+hunks you added and press `Ctrl-s`: those hunks become their own commit, and
+jj-compose reopens on what is left of the change, ready for the next message.
+Repeat until nothing is left.
+
+This needs no configuration. jj-compose runs itself as jj's diff editor, passing
+the tool on `jj split`'s own command line, so `ui.diff-editor` is neither read
+nor needed: a `jj split --tool` setup of your own is left alone and goes on
+working from the command line as before.
+
+The description carries over to the remainder, as it does with `jj split`, so
+the form starts out holding the original message. Clear the parts that belong to
+the piece you just committed.
+
+Adding every hunk is a description rather than a split, so `Ctrl-s` then behaves
+exactly as it does outside split mode.
+
+Hunks are the smallest unit: there is no splitting a hunk by line, and a binary
+file has no hunks at all, so its change always stays with the remainder. A
+change with only one hunk can't be split.
 
 ## External diff tools
 
@@ -259,6 +304,11 @@ A GUI tool returns to the form as soon as you close its window. A terminal tool
 such as `difft` is paged by jj, so quit the pager (`q`) to come back. With no
 tool configured at all, `o` says so rather than opening jj's internal diff,
 which is the one already on screen.
+
+`ui.diff-editor` is sometimes set to something that only makes sense for
+splitting, such as a script wrapping `git add -p`. That isn't a viewer, so `o`
+would pick it up and do nothing useful. Set `--diff-tool` or
+`JJ_COMPOSE_DIFF_TOOL` to a real diff viewer in that case.
 
 ## License
 
