@@ -7,11 +7,11 @@ use thiserror::Error;
 pub enum Error {
     // The `#[from]` attribute automatically converts standard I/O errors into this variant.
     // This lets you use `?` directly on things like `Command::output()`.
-    #[error("I/O error during execution")]
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
     // Automatically converts UTF-8 parsing errors.
-    #[error("Output from jj command contained invalid UTF-8")]
+    #[error("output from jj was not valid UTF-8: {0}")]
     Utf8(#[from] FromUtf8Error),
 
     // A structured error for when `jj` runs but exits with a failure code.

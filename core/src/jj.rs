@@ -193,11 +193,7 @@ impl Jj {
     /// Returns an error if `jj split` fails, including when the choice would
     /// leave one of the two commits empty.
     pub fn split(&self, target: &Target, message: &str, patch: &Path, exe: &Path) -> Result<()> {
-        let program = format!("merge-tools.jj-compose.program={}", exe.display());
-        let edit_args = format!(
-            "merge-tools.jj-compose.edit-args=[\"--apply-hunks\",{},\"$left\",\"$right\"]",
-            patch.display()
-        );
+        let (program, edit_args) = diff_editor_config(exe, patch);
         self.output(&[
             "--config",
             &program,
@@ -259,5 +255,55 @@ impl Jj {
     /// If the underlying jj command fails
     pub fn git_diff(&self, target: &Target) -> Result<Vec<u8>> {
         self.output(&["diff", "-r", &target.commit_id, "--git", "--color=always"])
+    }
+}
+
+/// A path written as a TOML string: quoted, with backslashes and quotes
+/// escaped.
+///
+/// The quotes are not decoration. `jj --config` parses its value as TOML, so
+/// a bare path inside an array makes jj reject the whole value with a parse
+/// error rather than treating it as a string.
+fn toml_string(path: &Path) -> String {
+    let escaped = path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// The two `--config` values that make jj-compose jj's diff editor: the
+/// program to run, and the arguments to run it with.
+fn diff_editor_config(exe: &Path, patch: &Path) -> (String, String) {
+    (
+        format!("merge-tools.jj-compose.program={}", toml_string(exe)),
+        format!(
+            "merge-tools.jj-compose.edit-args=[\"--apply-hunks\",{},\"$left\",\"$right\"]",
+            toml_string(patch)
+        ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An unquoted path makes jj reject the whole `--config` value, which
+    /// showed up only as a failed split at the end of a long session.
+    #[test]
+    fn the_diff_editor_config_quotes_its_paths() {
+        let (program, edit_args) = diff_editor_config(
+            Path::new("/usr/local/bin/jj-compose"),
+            Path::new("/tmp/a patch.patch"),
+        );
+        assert_eq!(
+            program,
+            "merge-tools.jj-compose.program=\"/usr/local/bin/jj-compose\""
+        );
+        assert_eq!(
+            edit_args,
+            "merge-tools.jj-compose.edit-args=[\"--apply-hunks\",\"/tmp/a patch.patch\",\"$left\",\"$right\"]"
+        );
     }
 }

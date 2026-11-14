@@ -1071,8 +1071,7 @@ impl App {
             None => {}
         }
         if self.choosing() {
-            let keys =
-                " y add · n skip · a rest of file · d skip file · u back · Enter done · Esc leave";
+            let keys = " Space mark · n/p hunk · a/d file · A/C all · Enter message · Esc leave";
             return Line::from(vec![Span::raw(keys).dark_gray()]);
         }
         let keys = match (self.focus, self.keymap, self.vim.mode) {
@@ -1083,9 +1082,11 @@ impl App {
                     " j/k scroll · [/] file · {{/}} hunk · f files · / search · z zoom · s split · o/O {open} · l back"
                 )
             }
-            (Focus::Editor, Keymap::Default, _) => {
-                " Tab next · Enter next/newline · Alt-← diff · Alt-s split · ^t raw/form · ^s save · Esc quit".to_owned()
-            }
+            // A pending split changes what ^s does, so it says so.
+            (Focus::Editor, Keymap::Default, _) => self.split.as_ref().map(Split::count).map_or_else(|| " Tab next · Enter next/newline · Alt-← diff · Alt-s split · ^t raw/form · ^s save · Esc quit".to_owned(), |marked| format!(
+                     " Tab next · Alt-← hunks · ^s commit {marked} {} · ^t raw/form · Esc quit",
+                     plural(marked, "hunk")
+                 )),
             (Focus::Editor, Keymap::Vim, vim::Mode::Insert) => {
                 " Esc normal · Tab next · Enter next/newline · ^t raw/form · ^s save".to_owned()
             }
@@ -1604,6 +1605,93 @@ index 3333333..4444444 100644
     }
 
     #[test]
+    fn space_marks_the_hunk_on_screen_and_moving_decides_nothing() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char('n'));
+        press(&mut app, KeyCode::Char('n'));
+        let split = app.split.as_ref().unwrap();
+        assert_eq!(split.marked, [true, false, false]);
+        assert_eq!(split.at, 2, "moving past hunks left them unmarked");
+    }
+
+    /// The point of the whole design: a hunk you passed over can be read
+    /// again and marked once you have seen the rest.
+    #[test]
+    fn a_hunk_can_be_revisited_and_its_mark_changed() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('n'));
+        press(&mut app, KeyCode::Char('n'));
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.split.as_ref().unwrap().at, 0);
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.split.as_ref().unwrap().marked, [true, false, false]);
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.split.as_ref().unwrap().marked, [false, false, false]);
+    }
+
+    #[test]
+    fn marks_survive_a_trip_through_every_hunk() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char('G'));
+        press(&mut app, KeyCode::Char('g'));
+        assert!(app.split.as_ref().unwrap().is_marked());
+        assert_eq!(app.split.as_ref().unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_marks_every_hunk_in_the_file_on_screen() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('a'));
+        // Both of a.rs's hunks, and not b.rs's.
+        assert_eq!(app.split.as_ref().unwrap().marked, [true, true, false]);
+        assert_eq!(app.split.as_ref().unwrap().at, 0, "marking does not move");
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.split.as_ref().unwrap().marked, [false, false, false]);
+    }
+
+    #[test]
+    fn capital_a_and_c_mark_and_clear_everything() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('A'));
+        assert!(app.split.as_ref().unwrap().is_everything());
+        press(&mut app, KeyCode::Char('C'));
+        assert_eq!(app.split.as_ref().unwrap().count(), 0);
+    }
+
+    #[test]
+    fn enter_goes_to_the_message_without_seeing_every_hunk() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.focus, Focus::Editor);
+        assert!(!app.zoomed);
+        assert!(!app.choosing());
+        assert_eq!(
+            app.split.as_ref().unwrap().count(),
+            1,
+            "the marks are still held"
+        );
+    }
+
+    #[test]
+    fn the_strip_shows_every_hunk_and_where_you_are() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char('n'));
+        // Marked and elsewhere, here and unmarked, untouched.
+        assert_eq!(app.split.as_ref().unwrap().strip(), "+o·");
+    }
+
+    #[test]
     fn esc_leaves_split_mode_without_choosing() {
         let mut app = splitting_app();
         alt(&mut app, 's');
@@ -1613,10 +1701,10 @@ index 3333333..4444444 100644
     }
 
     #[test]
-    fn saving_with_no_hunks_added_explains_itself_instead() {
+    fn saving_with_no_hunks_marked_explains_itself_instead() {
         let mut app = splitting_app();
         alt(&mut app, 's');
-        press(&mut app, KeyCode::Enter); // done deciding, nothing added
+        press(&mut app, KeyCode::Enter);
         type_str(&mut app, "feat");
         press(&mut app, KeyCode::Tab);
         press(&mut app, KeyCode::Tab);
@@ -1627,10 +1715,10 @@ index 3333333..4444444 100644
     }
 
     #[test]
-    fn saving_some_hunks_asks_for_a_split() {
+    fn saving_some_marked_hunks_asks_for_a_split() {
         let mut app = splitting_app();
         alt(&mut app, 's');
-        press(&mut app, KeyCode::Char('y'));
+        press(&mut app, KeyCode::Char(' '));
         press(&mut app, KeyCode::Enter);
         type_str(&mut app, "feat");
         press(&mut app, KeyCode::Tab);
@@ -1638,7 +1726,7 @@ index 3333333..4444444 100644
         type_str(&mut app, "only the first hunk");
         assert!(ctrl(&mut app, 's').is_none(), "the app stays open");
         let Some(Request::Split { message }) = app.pending.take() else {
-            panic!("expected a split request, got {:?}", app.pending);
+            panic!("expected a split request");
         };
         assert!(
             message.starts_with("feat: only the first hunk"),
@@ -1646,13 +1734,13 @@ index 3333333..4444444 100644
         );
     }
 
+    /// Marking everything leaves nothing behind, so it is a description.
     #[test]
-    fn adding_every_hunk_just_describes_the_change() {
+    fn marking_every_hunk_just_describes_the_change() {
         let mut app = splitting_app();
         alt(&mut app, 's');
-        for _ in 0..3 {
-            press(&mut app, KeyCode::Char('y'));
-        }
+        press(&mut app, KeyCode::Char('A'));
+        press(&mut app, KeyCode::Enter);
         type_str(&mut app, "feat");
         press(&mut app, KeyCode::Tab);
         press(&mut app, KeyCode::Tab);
@@ -1666,12 +1754,11 @@ index 3333333..4444444 100644
     }
 
     #[test]
-    fn the_chosen_hunks_make_a_patch_of_only_themselves() {
+    fn the_marked_hunks_make_a_patch_of_only_themselves() {
         let mut app = splitting_app();
         alt(&mut app, 's');
-        press(&mut app, KeyCode::Char('n')); // a.rs first hunk: no
-        press(&mut app, KeyCode::Char('y')); // a.rs second hunk: yes
-        press(&mut app, KeyCode::Char('n')); // b.rs: no
+        press(&mut app, KeyCode::Char('n'));
+        press(&mut app, KeyCode::Char(' '));
         let picked = app.split.as_ref().unwrap().picked();
         let text = app.diff.patch().subset(&picked);
         assert!(text.contains("+FIVE"), "{text}");
