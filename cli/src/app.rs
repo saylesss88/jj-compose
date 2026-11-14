@@ -28,11 +28,7 @@ use crate::{
     vim::{self, Dir, Vim},
 };
 
-use jj_compose_core::{
-    jj::{Jj, Target},
-    message::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT},
-    patch::HunkId,
-};
+use jj_compose_core::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT, HunkId, Jj, Target};
 
 /// Which key bindings the editor uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -335,21 +331,36 @@ impl App {
         self.view = view;
         self.original = original;
         self.field = Field::Type;
-        self.split = Split::new(self.diff.hunks());
-        self.focus = Focus::Editor;
-        self.zoomed = false;
+        if let Some(split) = Split::new(self.diff.hunks()) {
+            self.enter_split(split);
+        } else {
+            self.split = None;
+            self.focus = Focus::Editor;
+            self.zoomed = false;
+        }
         Ok(self.diff.hunks().len())
+    }
+
+    /// Whether hunks are being chosen right now: a split is under way, it
+    ///
+    /// The pane, the status hint and the key routing all ask this, so none of
+    /// them can show one mode while another acts on a different one.
+    fn choosing(&self) -> bool {
+        self.focus == Focus::Diff && self.split.as_ref().is_some_and(|s| !s.done())
+    }
+
+    /// Show `split`'s current hunk and hand it the keys.
+    fn enter_split(&mut self, split: Split) {
+        self.diff.show_hunk(split.at);
+        self.split = Some(split);
+        self.focus = Focus::Diff;
+        self.zoomed = true;
     }
 
     /// Start choosing hunks for a commit, showing the first on its own.
     fn start_split(&mut self) {
         match Split::new(self.diff.hunks()) {
-            Some(split) => {
-                self.split = Some(split);
-                self.diff.show_hunk(0);
-                self.focus = Focus::Diff;
-                self.zoomed = true;
-            }
+            Some(split) => self.enter_split(split),
             None => {
                 self.status = Some(Status::Error(
                     "nothing to split: this change has fewer than two hunks".into(),
@@ -533,9 +544,7 @@ impl App {
             _ => {
                 return match self.focus {
                     // Split mode takes over the diff pane's keys.
-                    Focus::Diff if self.split.as_ref().is_some_and(|s| !s.done()) => {
-                        self.split_key(key.code, ctrl)
-                    }
+                    Focus::Diff if self.choosing() => self.split_key(key.code, ctrl),
                     Focus::Diff => self.diff_key(key.code, ctrl, confirming),
                     Focus::Editor if self.keymap == Keymap::Vim => self.vim_key(key, confirming),
                     Focus::Editor => self.editor_key(key, confirming),
@@ -869,7 +878,7 @@ impl App {
 
         // While splitting, the pane is one hunk and a tally, not the diff.
         let splitting = match &self.split {
-            Some(split) if !split.done() => Some((
+            Some(split) if self.choosing() => Some((
                 split.at,
                 split.ids.len(),
                 split.paths[split.at].clone(),
@@ -988,7 +997,7 @@ impl App {
             }
             None => {}
         }
-        if self.split.as_ref().is_some_and(|s| !s.done()) {
+        if self.choosing() {
             let keys =
                 " y add · n skip · a rest of file · d skip file · u back · Enter done · Esc leave";
             return Line::from(vec![Span::raw(keys).dark_gray()]);
@@ -1530,6 +1539,42 @@ index 3333333..4444444 100644
         assert!(app.split.as_ref().unwrap().done());
         assert_eq!(app.focus, Focus::Editor);
         assert!(!app.zoomed);
+    }
+
+    /// A split left mid-decision must keep the keys with the diff pane; the
+    /// reload after a commit used to hand them back to the form while the
+    /// pane still showed a hunk, so y/n went into the Type field as text.
+    #[test]
+    fn a_split_in_progress_always_has_the_keys() {
+        let mut app = splitting_app();
+        app.enter_split(Split::new(app.diff.hunks()).unwrap());
+        assert_eq!(app.focus, Focus::Diff);
+        assert!(app.choosing());
+
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(
+            app.split.as_ref().unwrap().at,
+            1,
+            "y decided a hunk rather than being typed"
+        );
+        assert_eq!(app.fields[Field::Type as usize].lines()[0], "");
+    }
+
+    /// Tabbing out to the form mid-decision is allowed, and then the pane and
+    /// the keys agree that the form has them.
+    #[test]
+    fn leaving_the_pane_mid_split_gives_the_form_the_keys() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Editor);
+        assert!(!app.choosing(), "the hunk view must not be on screen");
+
+        // Back in the pane, the same split carries on where it left off.
+        app.focus_diff();
+        assert!(app.choosing());
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.split.as_ref().unwrap().at, 1);
     }
 
     #[test]
