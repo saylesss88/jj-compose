@@ -1,8 +1,5 @@
-//! A TUI for writing and revising Conventional Commit descriptions of
-//! changes in a `jj` repository, with the change's diff alongside.
-//!
-//! See `message` for the message format and how existing descriptions are
-//! parsed without being rewritten.
+//! Core library of `jj-compose`
+//! jj wrapper, Conventional Commit message model, and diff/hunk splitting
 
 pub mod error;
 pub mod jj;
