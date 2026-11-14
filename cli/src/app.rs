@@ -28,7 +28,9 @@ use crate::{
     vim::{self, Dir, Vim},
 };
 
-use jj_compose_core::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT, Jj, Split, Target};
+use jj_compose_core::{
+    Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT, Jj, Split, TaggedCommit, Target,
+};
 
 /// Which key bindings the editor uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -60,6 +62,18 @@ pub struct Session {
     pub raw: bool,
     /// Tool `o`/`O` opens the diff in; `None` disables them, with a hint.
     pub diff_tool: Option<String>,
+    /// Tags a rewrite of this revision would strand. Empty unless the
+    /// revision is immutable and `--ignore-immutable` was given.
+    pub at_risk: Vec<TaggedCommit>,
+}
+
+/// What a session ended with.
+pub struct Outcome {
+    pub exit: Exit,
+    /// The revision the message is for, which a split moves on.
+    pub target: Target,
+    /// Commands to run because rewriting immutable history stranded tags.
+    pub recovery: Vec<String>,
 }
 
 /// Somewhere focus can move to.
@@ -130,6 +144,9 @@ pub struct App {
     target: Target,
     /// The split being composed, if any.
     split: Option<Split>,
+    /// Tags that a rewrite would strand, and the commands to put them back.
+    at_risk: Vec<TaggedCommit>,
+    recovery: Vec<String>,
     is_vertical: bool,
 }
 
@@ -177,6 +194,8 @@ impl App {
             pending: None,
             target,
             split: None,
+            at_risk: session.at_risk,
+            recovery: Vec::new(),
             is_vertical: false,
         }
     }
@@ -186,8 +205,11 @@ impl App {
     ///
     /// Returns an [`io::Error`] if drawing the UI frame to the terminal fails, or
     /// if reading the underlying terminal events (such as keystrokes) fails.
-    pub fn run(mut self, terminal: &mut DefaultTerminal, jj: &Jj) -> io::Result<(Exit, Target)> {
+    pub fn run(mut self, terminal: &mut DefaultTerminal, jj: &Jj) -> io::Result<Outcome> {
         const VERTICAL_BREAKPOINT: u16 = 120;
+
+        // Said before any work is done, not after it is wasted.
+        self.status = self.immutable_warning().or(self.status.take());
         loop {
             let size = terminal.size()?;
             self.is_vertical = size.width < VERTICAL_BREAKPOINT;
@@ -207,7 +229,11 @@ impl App {
             if let Some(exit) = exit {
                 // The target changes when a split happens, so the caller is
                 // told which revision the message is for.
-                return Ok((exit, self.target));
+                return Ok(Outcome {
+                    exit,
+                    target: self.target,
+                    recovery: self.recovery,
+                });
             }
             if let Some(request) = self.pending.take() {
                 self.perform(terminal, jj, &request)?;
@@ -235,6 +261,21 @@ impl App {
         result.map_err(|e| e.to_string())?;
 
         let left = self.reload(jj)?;
+        // Rebuilt rather than appended: each tag needs re-anchoring once, to
+        // whatever the remainder is after the last split of the session.
+        self.recovery = self
+            .at_risk
+            .iter()
+            .flat_map(|t| {
+                [
+                    format!(
+                        "jj tag set {} --allow-move -r {}    # was {} ({})",
+                        t.tag, self.target.change_id, t.commit, t.summary
+                    ),
+                    format!("git push origin {} --force", t.tag),
+                ]
+            })
+            .collect();
         self.status = Some(Status::Info(format!(
             "Committed {added} {}. {left} {} left to describe.",
             plural(added, "hunk"),
@@ -291,6 +332,24 @@ impl App {
     }
 
     /// Start choosing hunks for a commit, showing the first on its own.
+    /// The warning to open with when this revision is protected history.
+    fn immutable_warning(&self) -> Option<Status> {
+        if !self.target.immutable {
+            return None;
+        }
+        let tags: Vec<&str> = self.at_risk.iter().map(|t| t.tag.as_str()).collect();
+        Some(Status::Error(if tags.is_empty() {
+            "immutable revision: rewriting it gives every later commit a new hash".to_owned()
+        } else {
+            format!(
+                "immutable revision: a rewrite strands {} {} ({})",
+                tags.len(),
+                plural(tags.len(), "tag"),
+                tags.join(", ")
+            )
+        }))
+    }
+
     fn start_split(&mut self) {
         match Split::new(self.diff.hunks().iter().map(|h| (h.id, h.path.clone()))) {
             Some(split) => self.enter_split(split),
@@ -851,8 +910,9 @@ impl App {
             _ => None,
         };
         if let Some((at, total, path, marked, strip, on)) = splitting {
-            let title = Line::from(vec![
+            let mut title = vec![
                 Span::raw(format!(" Split {} ", self.change_id)),
+                immutable_marker(self.target.immutable),
                 Span::raw(format!("· hunk {}/{total} ", at + 1)),
                 Span::raw(format!("· {path} ")),
                 // The strip is every hunk at once: `#` here and marked, `o`
@@ -862,7 +922,9 @@ impl App {
                     format!("· {marked} marked "),
                     if on { Color::Green } else { Color::DarkGray },
                 ),
-            ]);
+            ];
+            title.retain(|span| !span.content.is_empty());
+            let title = Line::from(title);
             let block = pane(title, Some(accent));
             self.diff.render_hunk(frame, diff_area, block, at);
             frame.render_widget(self.status_line(), status);
@@ -871,7 +933,11 @@ impl App {
 
         // The pane title is built up in pieces: change ID, then the file at the
         // top (commit 2), then the search (commit 4).
-        let mut title = vec![Span::raw(format!(" Diff {} ", self.change_id))];
+        let mut title = vec![
+            Span::raw(format!(" Diff {} ", self.change_id)),
+            immutable_marker(self.target.immutable),
+        ];
+        title.retain(|span| !span.content.is_empty());
         if let Some((n, file)) = self.diff.current_file() {
             let count = self.diff.file_count();
             title.push(Span::raw(format!("· {n}/{count} {} ", file.path)));
@@ -1110,6 +1176,16 @@ fn header_counter(len: usize) -> Span<'static> {
 }
 
 /// `n` with `word` pluralised the easy way.
+/// A standing reminder that this session is rewriting protected history, so
+/// it can't be forgotten three splits in. Empty when it isn't.
+fn immutable_marker(immutable: bool) -> Span<'static> {
+    if immutable {
+        Span::styled("· immutable ", Color::Red)
+    } else {
+        Span::raw("")
+    }
+}
+
 fn plural(n: usize, word: &str) -> String {
     if n == 1 {
         word.to_owned()
@@ -1140,11 +1216,13 @@ mod tests {
                 keymap,
                 raw: false,
                 diff_tool: diff_tool.map(str::to_owned),
+                at_risk: Vec::new(),
             },
             Target {
                 commit_id: "0123456789abcdef".into(),
                 change: "zzzzzzzzzzzzzzzz".into(),
                 change_id: "zzzzzzzz".into(),
+                immutable: false,
             },
         )
     }
@@ -1592,6 +1670,34 @@ index 3333333..4444444 100644
         assert!(text.contains("+FIVE"), "{text}");
         assert!(!text.contains("+ONE"), "{text}");
         assert!(!text.contains("b.rs"), "{text}");
+    }
+
+    /// Rewriting protected history is flagged before any work is done, and
+    /// the flag names the tags that would be stranded.
+    #[test]
+    fn an_immutable_revision_warns_and_names_the_tags_at_risk() {
+        let mut app = splitting_app();
+        assert!(app.immutable_warning().is_none(), "mutable: nothing to say");
+
+        app.target.immutable = true;
+        assert!(matches!(app.immutable_warning(), Some(Status::Error(_))));
+
+        app.at_risk = vec![TaggedCommit {
+            tag: "v0.1.0".to_owned(),
+            commit: "aca8d2e2".to_owned(),
+            summary: "feat: three things at once".to_owned(),
+        }];
+        let Some(Status::Error(text)) = app.immutable_warning() else {
+            panic!("expected an error status");
+        };
+        assert!(text.contains("v0.1.0"), "{text}");
+        assert!(text.contains("1 tag"), "{text}");
+    }
+
+    #[test]
+    fn the_immutable_marker_shows_only_on_protected_history() {
+        assert_eq!(immutable_marker(false).content, "");
+        assert!(immutable_marker(true).content.contains("immutable"));
     }
 
     #[test]

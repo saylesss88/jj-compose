@@ -23,7 +23,7 @@ use ratatui::crossterm::{
 
 use jj_compose_core::{Jj, split};
 
-use crate::app::{App, Exit, Keymap, Session};
+use crate::app::{App, Exit, Keymap, Outcome, Session};
 
 /// Write a Conventional Commit description for a jj change.
 #[derive(Debug, Parser)]
@@ -53,6 +53,13 @@ struct Args {
     #[arg(long, value_name = "NAME", env = "JJ_COMPOSE_DIFF_TOOL")]
     diff_tool: Option<String>,
 
+    /// Rewrite commits jj protects as immutable, such as tagged releases.
+    ///
+    /// Splitting one strands every tag on it or after it and gives every
+    /// later commit a new hash. jj-compose names the tags to re-anchor.
+    #[arg(long)]
+    ignore_immutable: bool,
+
     /// Internal: run as jj's diff editor, keeping only the hunks in PATCH.
     #[arg(long, num_args = 3, value_names = ["PATCH", "LEFT", "RIGHT"], hide = true)]
     apply_hunks: Option<Vec<String>>,
@@ -81,7 +88,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     }
 
     let revset = args.revset.or(args.revision).unwrap_or_else(|| "@".into());
-    let jj = Jj::new(args.repository);
+    let jj = Jj::new(args.repository).ignoring_immutable(args.ignore_immutable);
 
     // Fail before touching the terminal: resolve the revision once. The diff
     // and description are read from that commit; `jj describe` targets its
@@ -89,12 +96,20 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     let target = jj.resolve(&revset)?;
     let diff = diff::load(&jj, &target)?;
     let description = jj.description(&target)?;
+    // Warn before any work is done rather than after: these are the tags a
+    // rewrite would strand.
+    let at_risk = if target.immutable {
+        jj.orphaned_tags(&target)?
+    } else {
+        Vec::new()
+    };
     let session = Session {
         description: description.clone(),
         change_id: target.change_id.clone(),
         keymap: args.keymap,
         raw: args.raw,
         diff_tool: args.diff_tool.or_else(|| diff_tool(&jj)),
+        at_risk,
     };
 
     let mut terminal = init_terminal()?;
@@ -104,12 +119,22 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     // Run `jj describe` only after the terminal is restored, so its output
     // (and any error) is visible to the user. A split may have moved the
     // session on to a different revision, so use the one it ended on.
-    let (exit, target) = result?;
+    let Outcome {
+        exit,
+        target,
+        recovery,
+    } = result?;
     if let Exit::Commit(message) = exit {
         if message == description.trim_end() {
             eprintln!("Description of {} unchanged.", target.change_id);
         } else {
             jj.describe(&target, &message)?;
+        }
+    }
+    if !recovery.is_empty() {
+        eprintln!("\nRewriting immutable history left these tags behind:\n");
+        for line in &recovery {
+            eprintln!("  {line}");
         }
     }
 

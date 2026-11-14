@@ -15,6 +15,9 @@ diff.
 - **Live, Responsive Diffing:** View the full `jj` diff alongside your commit
   form. The layout automatically stacks on narrow terminals and flags stale
   diffs if you edit files in another window.
+- **Rewriting released history:** `--ignore-immutable` splits even a tagged
+  release, naming the tags it strands and printing the commands to re-anchor
+  them.
 - **First-Class Vim Keymap:** Use intuitive UI defaults, or launch with
   `--keymap vim` for full Normal/Insert mode modal editing (supports standard
   motions, operators, and visual selections).
@@ -85,6 +88,7 @@ jj-compose <revset>     # any single mutable revision
 | `--keymap <default\|vim>` | Key bindings. Also set by `JJ_COMPOSE_KEYMAP`.               |
 | `--raw`                   | Start in the raw text editor instead of the form.            |
 | `--diff-tool <NAME>`      | Tool `o`/`O` open the diff in. Also `JJ_COMPOSE_DIFF_TOOL`.  |
+| `--ignore-immutable`      | Allow rewriting protected history. See below.                |
 
 The revset must resolve to exactly one mutable revision; immutable ones are
 rejected before the TUI opens. It's resolved once, at launch, so `@-` or a
@@ -313,6 +317,43 @@ behaves exactly as it does outside split mode.
 Hunks are the smallest unit: there is no splitting a hunk by line, and a binary
 file has no hunks at all, so its change always stays with the remainder. A
 change with only one hunk can't be split.
+
+## Rewriting released history
+
+By default a revision jj protects as immutable — a tagged release, anything on
+trunk — is refused before the TUI opens. `--ignore-immutable` passes jj's own
+flag of that name through to every command, so such a revision can be split
+like any other.
+
+Two things happen when you do, and jj-compose can reverse neither:
+
+- **Every tag on that revision or after it is stranded**, left pointing at a
+  commit that is now hidden. Splitting is worse than describing here: one
+  commit becomes two, so there is no mechanical answer to where the tag
+  belongs. jj-compose suggests the remainder, since that is the commit holding
+  the whole of the original content. Tags on *ancestors* are untouched.
+- **Every later commit gets a new hash**, because jj rebases the descendants.
+
+So the mode is loud about it. The pane title carries `· immutable` for the
+whole session, the status bar names the tags at risk before any work is done,
+and on exit jj-compose prints what to run:
+
+```text
+Rewriting immutable history left these tags behind:
+
+  jj tag set v0.1.0 --allow-move -r oxuonltl    # was 0688276c (feat: three things at once)
+  git push origin v0.1.0 --force
+```
+
+The `git push` is there because `jj git push` cannot force-push a tag; that
+one step has to go through git.
+
+Think twice before using this on anything already published. If a release is
+on crates.io, rewriting its commit makes your history disagree with the
+tarball, and you then maintain that disagreement through force-pushed tags and
+a regenerated changelog. The honest use is a release made minutes ago that
+nobody has pulled — and for that, `jj op restore` is usually cleaner still,
+since it rolls the tag back too instead of leaving you to re-anchor it.
 
 ## External diff tools
 

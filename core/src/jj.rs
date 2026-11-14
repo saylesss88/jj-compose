@@ -12,10 +12,25 @@ use std::{
 
 use crate::{Error, Result};
 
-/// How to invoke `jj`: which repository to operate on.
+/// How to invoke `jj`: which repository to operate on, and whether it may
+/// rewrite history jj considers immutable.
 #[derive(Debug, Clone, Default)]
 pub struct Jj {
     repository: Option<PathBuf>,
+    /// Pass `--ignore-immutable` to every command, letting released commits
+    /// be rewritten. See [`Jj::orphaned_tags`] for what that costs.
+    ignore_immutable: bool,
+}
+
+/// A tag that a rewrite would leave pointing at a hidden commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaggedCommit {
+    /// The tag's name, such as `v0.1.0`.
+    pub tag: String,
+    /// Short commit ID it currently points at.
+    pub commit: String,
+    /// First line of that commit's description.
+    pub summary: String,
 }
 
 /// The one revision a session edits.
@@ -27,18 +42,42 @@ pub struct Target {
     pub change: String,
     /// Shortest unique change ID, for display.
     pub change_id: String,
+    /// Whether jj protects this commit as immutable. Only ever true when
+    /// [`Jj::ignores_immutable`] is set, since otherwise resolving refuses.
+    pub immutable: bool,
 }
 
 impl Jj {
     #[must_use]
     pub const fn new(repository: Option<PathBuf>) -> Self {
-        Self { repository }
+        Self {
+            repository,
+            ignore_immutable: false,
+        }
+    }
+
+    /// Allow rewriting commits jj protects as immutable, such as tagged
+    /// releases and anything on trunk.
+    #[must_use]
+    pub const fn ignoring_immutable(mut self, yes: bool) -> Self {
+        self.ignore_immutable = yes;
+        self
+    }
+
+    /// Whether this is allowed to rewrite immutable history.
+    #[must_use]
+    pub const fn ignores_immutable(&self) -> bool {
+        self.ignore_immutable
     }
 
     fn command(&self) -> Command {
         let mut cmd = Command::new("jj");
         if let Some(repo) = &self.repository {
             cmd.arg("-R").arg(repo);
+        }
+        // One place, so describe, split and diff all agree about it.
+        if self.ignore_immutable {
+            cmd.arg("--ignore-immutable");
         }
         cmd
     }
@@ -105,7 +144,7 @@ impl Jj {
         else {
             return Err(Error::UnexpectedOutput(line.to_owned()));
         };
-        if mutability == "immutable" {
+        if mutability == "immutable" && !self.ignore_immutable {
             return Err(Error::ImmutableRevision(change_id.to_owned()));
         }
 
@@ -113,6 +152,7 @@ impl Jj {
             commit_id: commit_id.to_owned(),
             change: change.to_owned(),
             change_id: change_id.to_owned(),
+            immutable: mutability == "immutable",
         })
     }
 
@@ -209,6 +249,43 @@ impl Jj {
             "jj-compose",
         ])?;
         Ok(())
+    }
+
+    /// Tags on `target` or anything descended from it: exactly the tags a
+    /// rewrite of `target` would strand, left pointing at commits that are
+    /// about to become hidden.
+    ///
+    /// Rewriting `target` replaces it and rebases its descendants onto the
+    /// result, so every commit from here on gets a new hash while the tags
+    /// stay where they were. Re-anchor each with
+    /// `jj tag set <tag> --allow-move -r <new revision>`. Tags on ancestors
+    /// are untouched and are not reported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `jj log` fails or its output can't be parsed.
+    pub fn orphaned_tags(&self, target: &Target) -> Result<Vec<TaggedCommit>> {
+        const TEMPLATE: &str =
+            r#"tags ++ "\t" ++ commit_id.shortest(8) ++ "\t" ++ description.first_line() ++ "\n""#;
+        let revset = format!("tags() & {}::", target.change);
+        let stdout = self.output(&["log", "--no-graph", "-r", &revset, "-T", TEMPLATE])?;
+        String::from_utf8(stdout)?
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let mut parts = line.split('\t');
+                let (Some(tag), Some(commit), Some(summary)) =
+                    (parts.next(), parts.next(), parts.next())
+                else {
+                    return Err(Error::UnexpectedOutput(line.to_owned()));
+                };
+                Ok(TaggedCommit {
+                    tag: tag.trim().to_owned(),
+                    commit: commit.to_owned(),
+                    summary: summary.to_owned(),
+                })
+            })
+            .collect()
     }
 
     /// Set the description of `target`.
