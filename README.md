@@ -1,8 +1,28 @@
 # jj-compose
 
-A terminal UI for writing and revising
-[Conventional Commit](https://www.conventionalcommits.org/) descriptions in
-[jj](https://jj-vcs.github.io/jj/), with the change's diff alongside.
+An interactive terminal UI for Jujutsu ([jj](https://jj-vcs.github.io/jj/)) that
+helps you split working-copy changes into atomic, structured
+[Conventional Commits](https://www.conventionalcommits.org/) while viewing the
+diff.
+
+## Features
+
+- **Strict Conventional Commits:** Draft structured messages with automatic
+  validation for types, scopes, header lengths (50/72 chars), and Git trailers.
+- **Interactive Hunk Splitting:** Press `Alt-s` to review your change hunk by
+  hunk. Mark the pieces that belong together and commit them instantly—zero
+  external `ui.diff-editor` configuration required.
+- **Live, Responsive Diffing:** View the full `jj` diff alongside your commit
+  form. The layout automatically stacks on narrow terminals and flags stale
+  diffs if you edit files in another window.
+- **First-Class Vim Keymap:** Use intuitive UI defaults, or launch with
+  `--keymap vim` for full Normal/Insert mode modal editing (supports standard
+  motions, operators, and visual selections).
+- **Lossless Parsing:** Safely revises existing descriptions. If an old commit
+  message doesn't perfectly match the Conventional format, it opens in a raw
+  text editor to prevent accidental mangling.
+- **External Tool Integration:** Press `o` to instantly open the current file or
+  change in your configured external diff viewer (like Meld or Difftastic).
 
 ```text
 ┌ Diff xuurlzoz · 1/2 README.md +2 -0 ───────────┐┌ Type ────────────┐┌ Scope ─────────────────────┐
@@ -249,17 +269,17 @@ Moving decides nothing. Nothing is final until you commit, so you can read the
 whole change first and then mark it, which is usually the only way to see what
 actually goes together:
 
-| Key                             | Action                                     |
-| ------------------------------- | ------------------------------------------ |
-| `Space`                         | Mark or unmark the hunk on screen          |
-| `n` / `p`, `}` / `{`, `→` / `←` | Next / previous hunk                       |
-| `g` / `G`                       | First / last hunk                          |
-| `y`                             | Mark this hunk and move to the next        |
-| `a` / `d`                       | Mark / unmark every hunk in this file      |
-| `A` / `C`                       | Mark every hunk / clear every mark         |
-| `Enter`                         | Done marking; go write the message         |
-| `Esc`, `q`                      | Leave split mode, discarding the marks     |
-| `j` / `k`, `Ctrl-d` / `Ctrl-u`  | Scroll inside a hunk taller than the pane  |
+| Key                             | Action                                    |
+| ------------------------------- | ----------------------------------------- |
+| `Space`                         | Mark or unmark the hunk on screen         |
+| `n` / `p`, `}` / `{`, `→` / `←` | Next / previous hunk                      |
+| `g` / `G`                       | First / last hunk                         |
+| `y`                             | Mark this hunk and move to the next       |
+| `a` / `d`                       | Mark / unmark every hunk in this file     |
+| `A` / `C`                       | Mark every hunk / clear every mark        |
+| `Enter`                         | Done marking; go write the message        |
+| `Esc`, `q`                      | Leave split mode, discarding the marks    |
+| `j` / `k`, `Ctrl-d` / `Ctrl-u`  | Scroll inside a hunk taller than the pane |
 
 The pane's title tracks both where you are and the shape of the whole change:
 
@@ -267,8 +287,8 @@ The pane's title tracks both where you are and the shape of the whole change:
  Split xuurlzoz · hunk 2/5 · src/app.rs · [+o··+] · 2 marked
 ```
 
-In that strip there is one character per hunk: `#` the current hunk, marked;
-`o` the current hunk, unmarked; `+` marked elsewhere; `·` untouched.
+In that strip there is one character per hunk: `#` the current hunk, marked; `o`
+the current hunk, unmarked; `+` marked elsewhere; `·` untouched.
 
 `Enter` hands the keys back to the form with the marks held. Write the message
 for the marked hunks and press `Ctrl-s`: those hunks become their own commit,
