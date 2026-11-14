@@ -123,7 +123,6 @@ impl App {
         Some(Stop::Field(field))
     }
 
-    /// Move focus in `dir`, if there's anything there.
     pub(super) fn go(&mut self, dir: Dir) {
         match self.neighbor(dir) {
             Some(Stop::Field(field)) => {
