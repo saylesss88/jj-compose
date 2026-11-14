@@ -1,36 +1,25 @@
 //! Application state, input handling and rendering.
 
-use std::{
-    fs,
-    io::{self, Write},
-    process,
-};
+mod effects;
+mod focus;
+mod split;
+mod ui;
+
+use std::io;
 
 use ratatui::{
-    DefaultTerminal, Frame,
-    crossterm::{
-        event::{
-            self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent,
-            KeyEventKind, KeyModifiers,
-        },
-        execute,
-        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-    },
-    layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
-    text::{Line, Span},
-    widgets::Block,
+    DefaultTerminal,
+    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
 };
-use ratatui_textarea::{CursorMove, Input, TextArea, WrapMode};
+use ratatui_textarea::{CursorMove, Input, TextArea};
 
 use crate::{
-    diff::{self, DiffView},
+    app::focus::Stop,
+    diff::DiffView,
     vim::{self, Dir, Vim},
 };
 
-use jj_compose_core::{
-    Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT, Jj, Split, TaggedCommit, Target,
-};
+use jj_compose_core::{Draft, Field, Jj, Split, TaggedCommit, Target};
 
 /// Which key bindings the editor uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -74,13 +63,6 @@ pub struct Outcome {
     pub target: Target,
     /// Commands to run because rewriting immutable history stranded tags.
     pub recovery: Vec<String>,
-}
-
-/// Somewhere focus can move to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stop {
-    Diff,
-    Field(Field),
 }
 
 /// Where keyboard focus is: the diff pane, or the editor (the current form
@@ -159,7 +141,7 @@ impl App {
         // otherwise show the text as-is rather than guess.
         let (draft, view, status) = match Draft::parse(&original) {
             Ok(draft) if !session.raw => (draft, View::Structured, None),
-            Ok(draft) => (draft, View::Raw, None),
+            Ok(draft) => (draft, View::Raw, None), // ← this one
             Err(e) => (
                 Draft::default(),
                 View::Raw,
@@ -178,10 +160,10 @@ impl App {
         Self {
             diff,
             change_id: session.change_id,
-            fields: Field::ALL.map(|field| field_editor(field, draft.get(field))),
+            fields: Field::ALL.map(|field| ui::field_editor(field, draft.get(field))),
             field: Field::Type,
             top_field: Field::Type,
-            raw: raw_editor(&original),
+            raw: ui::raw_editor(&original),
             view,
             focus: Focus::Editor,
             original,
@@ -241,80 +223,6 @@ impl App {
         }
     }
 
-    /// Commit the chosen hunks and carry on with what is left.
-    ///
-    /// Nothing is taken from the UI until `jj split` has succeeded, so a
-    /// failure leaves the choice intact to try again.
-    fn run_split(&mut self, jj: &Jj, message: &str) -> Result<(), String> {
-        let Some(split) = self.split.as_ref() else {
-            return Ok(());
-        };
-        let added = split.count();
-        let text = self.diff.patch().subset(&split.picked());
-
-        // jj runs jj-compose as its diff editor and passes it this patch.
-        let path = std::env::temp_dir().join(format!("jj-compose-{}.patch", process::id()));
-        fs::write(&path, text).map_err(|e| format!("couldn't write the patch: {e}"))?;
-        let exe = std::env::current_exe().map_err(|e| format!("couldn't find jj-compose: {e}"))?;
-        let result = jj.split(&self.target, message, &path, &exe);
-        let _ = fs::remove_file(&path);
-        result.map_err(|e| e.to_string())?;
-
-        let left = self.reload(jj)?;
-        // Rebuilt rather than appended: each tag needs re-anchoring once, to
-        // whatever the remainder is after the last split of the session.
-        self.recovery = self
-            .at_risk
-            .iter()
-            .flat_map(|t| {
-                [
-                    format!(
-                        "jj tag set {} --allow-move -r {}    # was {} ({})",
-                        t.tag, self.target.change_id, t.commit, t.summary
-                    ),
-                    format!("git push origin {} --force", t.tag),
-                ]
-            })
-            .collect();
-        self.status = Some(Status::Info(format!(
-            "Committed {added} {}. {left} {} left to describe.",
-            plural(added, "hunk"),
-            plural(left, "hunk"),
-        )));
-        Ok(())
-    }
-
-    /// Move to what is left of the change after a split, and start again on
-    /// it: new diff, the description jj carried over, and a fresh split.
-    fn reload(&mut self, jj: &Jj) -> Result<usize, String> {
-        // The hunks that were split off keep the old change ID; the
-        // remainder is a new change, and the only child of that commit.
-        let remainder = format!("{}+", self.target.change);
-        self.target = jj.resolve(&remainder).map_err(|e| e.to_string())?;
-        self.change_id = self.target.change_id.clone();
-        self.diff = diff::load(jj, &self.target).map_err(|e| e.to_string())?;
-
-        let description = jj.description(&self.target).map_err(|e| e.to_string())?;
-        let original = description.trim_end().to_owned();
-        let (draft, view) = Draft::parse(&original).map_or_else(
-            |_| (Draft::default(), View::Raw),
-            |draft| (draft, View::Structured),
-        );
-        self.fields = Field::ALL.map(|field| field_editor(field, draft.get(field)));
-        self.raw = raw_editor(&original);
-        self.view = view;
-        self.original = original;
-        self.field = Field::Type;
-        if let Some(split) = Split::new(self.diff.hunks().iter().map(|h| (h.id, h.path.clone()))) {
-            self.enter_split(split);
-        } else {
-            self.split = None;
-            self.focus = Focus::Editor;
-            self.zoomed = false;
-        }
-        Ok(self.diff.hunks().len())
-    }
-
     /// Whether hunks are being chosen right now: a split is under way, it
     ///
     /// The pane, the status hint and the key routing all ask this, so none of
@@ -329,156 +237,6 @@ impl App {
         self.split = Some(split);
         self.focus = Focus::Diff;
         self.zoomed = true;
-    }
-
-    /// Start choosing hunks for a commit, showing the first on its own.
-    /// The warning to open with when this revision is protected history.
-    fn immutable_warning(&self) -> Option<Status> {
-        if !self.target.immutable {
-            return None;
-        }
-        let tags: Vec<&str> = self.at_risk.iter().map(|t| t.tag.as_str()).collect();
-        Some(Status::Error(if tags.is_empty() {
-            "immutable revision: rewriting it gives every later commit a new hash".to_owned()
-        } else {
-            format!(
-                "immutable revision: a rewrite strands {} {} ({})",
-                tags.len(),
-                plural(tags.len(), "tag"),
-                tags.join(", ")
-            )
-        }))
-    }
-
-    fn start_split(&mut self) {
-        match Split::new(self.diff.hunks().iter().map(|h| (h.id, h.path.clone()))) {
-            Some(split) => self.enter_split(split),
-            None => {
-                self.status = Some(Status::Error(
-                    "nothing to split: this change has fewer than two hunks".into(),
-                ));
-            }
-        }
-    }
-
-    fn cancel_split(&mut self) {
-        self.split = None;
-        self.zoomed = false;
-        self.focus = Focus::Editor;
-        self.status = Some(Status::Info("Left split mode.".into()));
-    }
-
-    /// Leave the hunks marked as they are and go write the message.
-    fn write_message(&mut self) {
-        let marked = self.split.as_ref().map_or(0, Split::count);
-        self.zoomed = false;
-        self.focus = Focus::Editor;
-        self.status = Some(Status::Info(format!(
-            "{marked} {} marked. Write the message, then ^s to commit them.",
-            plural(marked, "hunk")
-        )));
-    }
-
-    /// Deciding one hunk at a time: add it, skip it, or move around.
-    fn split_key(&mut self, code: KeyCode, ctrl: bool) -> Option<Exit> {
-        // Scrolling, for a hunk taller than the pane.
-        match code {
-            KeyCode::Char('d') if ctrl => {
-                self.diff.scroll_down(self.diff.half_page());
-                return None;
-            }
-            KeyCode::Char('u') if ctrl => {
-                self.diff.scroll_up(self.diff.half_page());
-                return None;
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.diff.scroll_down(1);
-                return None;
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.diff.scroll_up(1);
-                return None;
-            }
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.cancel_split();
-                return None;
-            }
-            // Done marking, whether or not every hunk has been seen.
-            KeyCode::Enter => {
-                self.write_message();
-                return None;
-            }
-            _ => {}
-        }
-        let split = self.split.as_mut()?;
-        match code {
-            KeyCode::Char(' ') => split.toggle(),
-            // `y` and `n` read as they do in `git add -p`, except that
-            // neither is final: an unmarked hunk can be marked later.
-            KeyCode::Char('y') => {
-                split.mark(true);
-                split.next();
-            }
-            KeyCode::Char('n' | '}') | KeyCode::Right => split.next(),
-            KeyCode::Char('p' | '{') | KeyCode::Left => split.prev(),
-            KeyCode::Char('a') => split.mark_file(true),
-            KeyCode::Char('d') => split.mark_file(false),
-            KeyCode::Char('A') => split.mark_all(true),
-            KeyCode::Char('C') => split.mark_all(false),
-            KeyCode::Char('g') => split.first(),
-            KeyCode::Char('G') => split.last(),
-            _ => return None,
-        }
-
-        if let Some(at) = self.split.as_ref().map(Split::at) {
-            self.diff.show_hunk(at);
-        }
-        None
-    }
-
-    /// Carry out a [`Request`] with the TUI out of the way.
-    fn perform(
-        &mut self,
-        terminal: &mut DefaultTerminal,
-        jj: &Jj,
-        request: &Request,
-    ) -> io::Result<()> {
-        match request {
-            Request::Split { message } => {
-                if let Err(e) = self.run_split(jj, message) {
-                    self.status = Some(Status::Error(e));
-                }
-            }
-            Request::OpenDiff { path } => {
-                // With no tool there is nothing to open but jj's own diff,
-                // which is the one already on screen; say so instead.
-                let Some(tool) = self.diff_tool.clone() else {
-                    self.status = Some(Status::Error(
-                        "no diff tool: set ui.diff-editor in your jj config, or pass --diff-tool"
-                            .into(),
-                    ));
-                    return Ok(());
-                };
-                let target = self.target.clone();
-                let result = suspend(terminal, || {
-                    // A GUI tool can take a moment to appear, and the screen
-                    // is blank until it does.
-                    println!("Opening {tool}...");
-                    let result = jj.show_diff(&target, &tool, path.as_deref());
-                    // jj pages a terminal tool's output and a GUI holds its
-                    // own window, so only a failure needs the screen held:
-                    // its message would otherwise vanish with the redraw.
-                    if result.is_err() {
-                        wait_for_key("Press Enter to return to jj-compose ");
-                    }
-                    result.map_err(|e| e.to_string())
-                })?;
-                if let Err(e) = result {
-                    self.status = Some(Status::Error(e));
-                }
-            }
-        }
-        Ok(())
     }
 
     fn draft(&self) -> Draft {
@@ -732,342 +490,9 @@ impl App {
         Some(Exit::Commit(message))
     }
 
-    fn focus_diff(&mut self) {
-        self.editor().cancel_selection();
-        if matches!(self.vim.mode, vim::Mode::Visual | vim::Mode::Operator(_)) {
-            self.vim.mode = vim::Mode::Normal;
-        }
-        self.focus = Focus::Diff;
-    }
-
-    /// Switch between the form and the raw text. Going back to the form only
-    /// works if it can hold the text exactly.
-    fn toggle_view(&mut self) {
-        match self.view {
-            View::Structured => {
-                self.raw = raw_editor(&self.draft().render());
-                self.view = View::Raw;
-            }
-            View::Raw => match Draft::parse(&self.message()) {
-                Ok(draft) => {
-                    self.fields = Field::ALL.map(|field| field_editor(field, draft.get(field)));
-                    self.view = View::Structured;
-                }
-                Err(e) => {
-                    self.status = Some(Status::Error(format!("can't switch to the form: {e}")));
-                    return;
-                }
-            },
-        }
-        self.focus = Focus::Editor;
-        if matches!(self.vim.mode, vim::Mode::Visual | vim::Mode::Operator(_)) {
-            self.vim.mode = vim::Mode::Normal;
-        }
-    }
-
-    /// Tab order: every form field (or the raw editor), then the diff pane,
-    /// then around again.
-    fn cycle_focus(&mut self, forward: bool) {
-        if self.view == View::Raw {
-            self.focus = match self.focus {
-                Focus::Diff => Focus::Editor,
-                Focus::Editor => Focus::Diff,
-            };
-            return;
-        }
-        let stops = Field::ALL.len() + 1;
-        let current = match self.focus {
-            Focus::Editor => self.field as usize,
-            Focus::Diff => Field::ALL.len(),
-        };
-        let next = if forward {
-            (current + 1) % stops
-        } else {
-            (current + stops - 1) % stops
-        };
-        if let Some(&field) = Field::ALL.get(next) {
-            self.focus_field(field);
-        } else {
-            self.editor().cancel_selection();
-            self.focus = Focus::Diff;
-        }
-    }
-
-    /// What lies in `dir` from the current field, as laid out on screen:
-    ///
-    /// ```text
-    ///  diff | Type | Scope
-    ///       | Subject
-    ///       | Body ... Trailers
-    /// ```
-    fn neighbor(&self, dir: Dir) -> Option<Stop> {
-        use Field::{Scope, Subject, Trailers, Type};
-        if self.view == View::Raw {
-            return if self.is_vertical {
-                (dir == Dir::Up).then_some(Stop::Diff)
-            } else {
-                (dir == Dir::Left).then_some(Stop::Diff)
-            };
-        }
-
-        let field = match (dir, self.field) {
-            (Dir::Up, Type | Scope) => {
-                return if self.is_vertical {
-                    Some(Stop::Diff)
-                } else {
-                    None
-                };
-            }
-            (Dir::Down, Trailers) => return None,
-
-            (Dir::Right, _) if self.field != Type => return None,
-
-            (Dir::Left, f) if f != Scope => {
-                return if self.is_vertical {
-                    None
-                } else {
-                    Some(Stop::Diff)
-                };
-            }
-
-            (Dir::Up, Subject) => self.top_field,
-            (Dir::Down, Type | Scope) => Subject,
-            (Dir::Left, _) => Type,
-            (Dir::Right, _) => Scope,
-            (Dir::Up, f) => f.prev(),
-            (Dir::Down, f) => f.next(),
-        };
-        Some(Stop::Field(field))
-    }
-
-    /// Move focus in `dir`, if there's anything there.
-    fn go(&mut self, dir: Dir) {
-        match self.neighbor(dir) {
-            Some(Stop::Field(field)) => {
-                self.focus_field(field);
-                // Arrive at the side you came from, so l then h is a no-op.
-                let editor = self.editor();
-                match dir {
-                    Dir::Right => {
-                        editor.move_cursor(CursorMove::Top);
-                        editor.move_cursor(CursorMove::Head);
-                    }
-                    Dir::Left => {
-                        editor.move_cursor(CursorMove::Bottom);
-                        editor.move_cursor(CursorMove::End);
-                    }
-                    Dir::Up | Dir::Down => {}
-                }
-            }
-            Some(Stop::Diff) => self.focus_diff(),
-            None => {}
-        }
-    }
-
-    fn focus_field(&mut self, field: Field) {
-        if matches!(self.field, Field::Type | Field::Scope) {
-            self.top_field = self.field;
-        }
-        // Leave no half-finished selection or operator behind.
-        self.editor().cancel_selection();
-        if matches!(self.vim.mode, vim::Mode::Visual | vim::Mode::Operator(_)) {
-            self.vim.mode = vim::Mode::Normal;
-        }
-        self.focus = Focus::Editor;
-        self.field = field;
-    }
-
     // -----------------------------------------------------------------------
     // Rendering
     // -----------------------------------------------------------------------
-
-    fn draw(&mut self, frame: &mut Frame<'_>) {
-        let [main, status] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
-        // Zoom lasts only while the diff has focus.
-        self.zoomed &= self.focus == Focus::Diff;
-        // Side by side when there's room; stacked on narrow terminals.
-        let [diff_area, form_area] = if self.zoomed {
-            [main, Rect::default()]
-        } else if main.width >= 100 {
-            Layout::horizontal([Constraint::Percentage(50); 2]).areas(main)
-        } else {
-            Layout::vertical([Constraint::Percentage(40), Constraint::Fill(1)]).areas(main)
-        };
-
-        let accent = self.accent();
-
-        // While splitting, the pane is one hunk and a tally, not the diff.
-        let splitting = match &self.split {
-            Some(split) if self.choosing() => Some((
-                split.at(),
-                split.total(),
-                split.path().to_owned(),
-                split.count(),
-                split.strip(),
-                split.is_marked(),
-            )),
-            _ => None,
-        };
-        if let Some((at, total, path, marked, strip, on)) = splitting {
-            let mut title = vec![
-                Span::raw(format!(" Split {} ", self.change_id)),
-                immutable_marker(self.target.immutable),
-                Span::raw(format!("· hunk {}/{total} ", at + 1)),
-                Span::raw(format!("· {path} ")),
-                // The strip is every hunk at once: `#` here and marked, `o`
-                // here and not, `+` marked elsewhere, `·` not.
-                Span::styled(format!("· [{strip}] "), Color::Cyan),
-                Span::styled(
-                    format!("· {marked} marked "),
-                    if on { Color::Green } else { Color::DarkGray },
-                ),
-            ];
-            title.retain(|span| !span.content.is_empty());
-            let title = Line::from(title);
-            let block = pane(title, Some(accent));
-            self.diff.render_hunk(frame, diff_area, block, at);
-            frame.render_widget(self.status_line(), status);
-            return;
-        }
-
-        // The pane title is built up in pieces: change ID, then the file at the
-        // top (commit 2), then the search (commit 4).
-        let mut title = vec![
-            Span::raw(format!(" Diff {} ", self.change_id)),
-            immutable_marker(self.target.immutable),
-        ];
-        title.retain(|span| !span.content.is_empty());
-        if let Some((n, file)) = self.diff.current_file() {
-            let count = self.diff.file_count();
-            title.push(Span::raw(format!("· {n}/{count} {} ", file.path)));
-            title.push(Span::styled(format!("+{} ", file.added), Color::Green));
-            title.push(Span::styled(format!("-{} ", file.removed), Color::Red));
-        }
-        if let Some((query, n, count)) = self.diff.search_status() {
-            title.push(Span::raw(format!("· /{query} {n}/{count} ")));
-        }
-
-        let block = pane(
-            Line::from(title),
-            (self.focus == Focus::Diff).then_some(accent),
-        );
-        self.diff.render(frame, diff_area, block);
-
-        if !self.zoomed {
-            match self.view {
-                View::Structured => self.draw_form(frame, form_area),
-                View::Raw => self.draw_raw(frame, form_area),
-            }
-        }
-        frame.render_widget(self.status_line(), status);
-    }
-
-    fn draw_form(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        // Trailers are usually a line or two; give the room to the prose.
-        let trailer_rows = self.fields[Field::Trailers as usize].lines().len();
-        let trailer_height = u16::try_from(trailer_rows.clamp(1, 4)).unwrap_or(4) + 2;
-        let [top, subject, body, problem, solution, trailers] = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Fill(1),
-            Constraint::Fill(1),
-            Constraint::Fill(1),
-            Constraint::Length(trailer_height),
-        ])
-        .areas(area);
-        let [ty, scope] =
-            Layout::horizontal([Constraint::Percentage(40), Constraint::Fill(1)]).areas(top);
-        let areas = [ty, scope, subject, body, problem, solution, trailers];
-
-        let header_len = self.draft().header().chars().count();
-        let accent = self.accent();
-        for (field, area) in Field::ALL.into_iter().zip(areas) {
-            let focused = self.focus == Focus::Editor && self.field == field;
-            let editor = &mut self.fields[field as usize];
-            editor.set_block(pane(
-                field_title(field, header_len),
-                focused.then_some(accent),
-            ));
-            editor.set_cursor_style(cursor_style(focused));
-            frame.render_widget(&*editor, area);
-        }
-    }
-
-    fn draw_raw(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let header_len = self.raw.lines()[0].chars().count();
-        let title = Line::from(vec![
-            Span::raw(" Message (raw) "),
-            header_counter(header_len),
-        ]);
-        let focused = self.focus == Focus::Editor;
-        let accent = self.accent();
-        self.raw.set_block(pane(title, focused.then_some(accent)));
-        self.raw.set_cursor_style(cursor_style(focused));
-        frame.render_widget(&self.raw, area);
-    }
-
-    /// Border color of the focused pane: green in Vim's Normal mode,
-    /// yellow while typing.
-    const fn accent(&self) -> Color {
-        match (self.keymap, self.vim.mode) {
-            (Keymap::Vim, vim::Mode::Insert) | (Keymap::Default, _) => Color::Yellow,
-            (Keymap::Vim, _) => Color::Green,
-        }
-    }
-
-    /// Bottom row: a pending message, or the keys that work right now.
-    fn status_line(&self) -> Line<'static> {
-        if let Some(prompt) = &self.search_prompt {
-            return Line::from(format!("/{prompt}▏"));
-        }
-        match &self.status {
-            Some(Status::Error(err)) => return Line::from(format!(" ✗ {err}")).red().bold(),
-            Some(Status::Info(info)) => return Line::from(format!(" {info}")).cyan(),
-            Some(Status::ConfirmQuit) => {
-                return Line::from(
-                    " Unsaved changes. Quit again to discard them, or press any other key to keep editing.",
-                )
-                .yellow()
-                .bold();
-            }
-            None => {}
-        }
-        if self.choosing() {
-            let keys = " Space mark · n/p hunk · a/d file · A/C all · Enter message · Esc leave";
-            return Line::from(vec![Span::raw(keys).dark_gray()]);
-        }
-        let keys = match (self.focus, self.keymap, self.vim.mode) {
-            // Name the tool, so `o` says what it will actually open.
-            (Focus::Diff, ..) => {
-                let open = self.diff_tool.as_deref().unwrap_or("open");
-                format!(
-                    " j/k scroll · [/] file · {{/}} hunk · f files · / search · z zoom · s split · o/O {open} · l back"
-                )
-            }
-            // A pending split changes what ^s does, so it says so.
-            (Focus::Editor, Keymap::Default, _) => self.split.as_ref().map(Split::count).map_or_else(|| " Tab next · Enter next/newline · Alt-← diff · Alt-s split · ^t raw/form · ^s save · Esc quit".to_owned(), |marked| format!(
-                     " Tab next · Alt-← hunks · ^s commit {marked} {} · ^t raw/form · Esc quit",
-                     plural(marked, "hunk")
-                 )),
-            (Focus::Editor, Keymap::Vim, vim::Mode::Insert) => {
-                " Esc normal · Tab next · Enter next/newline · ^t raw/form · ^s save".to_owned()
-            }
-            (Focus::Editor, Keymap::Vim, vim::Mode::Visual) => {
-                " d/c/y operate · Esc cancel".to_owned()
-            }
-            (Focus::Editor, Keymap::Vim, _) => {
-                " i insert · hjkl past an edge: next box · ^d/^u scroll diff · ^t raw/form · ^s save · q quit".to_owned()
-            }
-        };
-        let mut spans = Vec::new();
-        if self.keymap == Keymap::Vim {
-            let badge = Span::raw(self.vim.mode.label()).black();
-            spans.push(badge.bg(self.accent()));
-        }
-        spans.push(Span::raw(keys).dark_gray());
-        Line::from(spans)
-    }
 
     /// Typing a search: Enter runs it, Esc cancels, Ctrl-c still quits.
     fn search_key(&mut self, key: KeyEvent) -> Option<Exit> {
@@ -1094,98 +519,6 @@ impl App {
     }
 }
 
-/// Run `f` with the terminal handed back to the shell (cooked mode, main
-/// screen), then take it over again and redraw from scratch.
-fn suspend<T>(terminal: &mut DefaultTerminal, f: impl FnOnce() -> T) -> io::Result<T> {
-    disable_raw_mode()?;
-    execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen)?;
-    let out = f();
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
-    // ratatui only redraws cells it thinks changed; after another program
-    // has used the screen, everything has.
-    terminal.clear()?;
-    Ok(out)
-}
-
-fn wait_for_key(prompt: &str) {
-    print!("\n{prompt}");
-    let _ = io::stdout().flush();
-    let _ = io::stdin().read_line(&mut String::new());
-}
-
-const fn cursor_style(focused: bool) -> Style {
-    if focused {
-        Style::new().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::new()
-    }
-}
-
-/// The raw message editor, cursor at the start.
-fn raw_editor(text: &str) -> TextArea<'static> {
-    let mut editor = TextArea::new(text.split('\n').map(str::to_owned).collect());
-    editor.set_cursor_line_style(Style::new());
-    editor.set_wrap_mode(WrapMode::WordOrGlyph);
-    editor
-}
-
-/// An editor for `field`, pre-filled with `text`, cursor at the end.
-fn field_editor(field: Field, text: &str) -> TextArea<'static> {
-    let mut editor = TextArea::new(text.split('\n').map(str::to_owned).collect());
-    editor.set_placeholder_text(field.placeholder());
-    // The default underlines the cursor line, which is noisy in a form.
-    editor.set_cursor_line_style(Style::new());
-    if field.is_multiline() {
-        editor.set_wrap_mode(WrapMode::WordOrGlyph);
-    }
-    editor.move_cursor(CursorMove::Bottom);
-    editor.move_cursor(CursorMove::End);
-    editor
-}
-
-/// A bordered pane, drawn in `accent` when focused.
-fn pane(title: Line<'static>, accent: Option<Color>) -> Block<'static> {
-    let style = Style::new().fg(accent.unwrap_or(Color::DarkGray));
-    Block::bordered()
-        .title(title)
-        .border_style(style)
-        .title_style(style)
-}
-
-/// The field's name; Subject also shows a live length counter for the
-/// whole header line.
-fn field_title(field: Field, header_len: usize) -> Line<'static> {
-    let title = format!(" {} ", field.title());
-    if field != Field::Subject {
-        return Line::from(title);
-    }
-    Line::from(vec![Span::raw(title), header_counter(header_len)])
-}
-
-fn header_counter(len: usize) -> Span<'static> {
-    let color = match len {
-        0..=HEADER_SOFT_LIMIT => Color::Green,
-        n if n <= HEADER_HARD_LIMIT => Color::Yellow,
-        _ => Color::Red,
-    };
-    Span::styled(
-        format!("{len}/{HEADER_HARD_LIMIT} "),
-        Style::new().fg(color),
-    )
-}
-
-/// `n` with `word` pluralised the easy way.
-/// A standing reminder that this session is rewriting protected history, so
-/// it can't be forgotten three splits in. Empty when it isn't.
-fn immutable_marker(immutable: bool) -> Span<'static> {
-    if immutable {
-        Span::styled("· immutable ", Color::Red)
-    } else {
-        Span::raw("")
-    }
-}
-
 fn plural(n: usize, word: &str) -> String {
     if n == 1 {
         word.to_owned()
@@ -1198,6 +531,8 @@ fn plural(n: usize, word: &str) -> String {
 mod tests {
     use super::*;
     use ratatui::Terminal;
+
+    use crate::app::ui;
 
     const EXAMPLE: &str = "fix(parser): handle empty input\n\n\
                            This also corrects an unrelated diagnostic.\n\n\
@@ -1696,8 +1031,8 @@ index 3333333..4444444 100644
 
     #[test]
     fn the_immutable_marker_shows_only_on_protected_history() {
-        assert_eq!(immutable_marker(false).content, "");
-        assert!(immutable_marker(true).content.contains("immutable"));
+        assert_eq!(ui::immutable_marker(false).content, "");
+        assert!(ui::immutable_marker(true).content.contains("immutable"));
     }
 
     #[test]
