@@ -3,9 +3,14 @@ name = "jj-compose"
 version.workspace = true
 edition.workspace = true
 readme.workspace = true
+authors.workspace = true
+exclude.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+repository.workspace = true
 
 [dependencies]
-jj-compose-core = { path = "../core", version = "0.1.0" }
+jj_compose_core = { path = "../core", version = "0.1.0" }
 anyhow = "1.0"
 clap = { version = "4", features = ["derive", "env"] }
 ratatui = "0.30"

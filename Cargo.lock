@@ -646,13 +646,13 @@ dependencies = [
  "ansi-to-tui",
  "anyhow",
  "clap",
- "jj-compose-core",
+ "jj_compose_core",
  "ratatui",
  "ratatui-textarea",
 ]
 
 [[package]]
-name = "jj-compose-core"
+name = "jj_compose_core"
 version = "0.1.0"
 dependencies = [
  "thiserror 1.0.69",
