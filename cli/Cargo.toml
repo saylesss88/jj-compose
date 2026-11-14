@@ -12,11 +12,11 @@ repository.workspace = true
 
 [dependencies]
 jj_compose_core = { path = "../core", version = "0.1.0" }
-anyhow = "1.0"
+anyhow = { version = "1.0", default-features = false }
 clap = { version = "4", features = ["derive", "env"] }
-ratatui = "0.30"
+ratatui = { version = "0.30", features = ["crossterm"], default-features = false }
 ratatui-textarea = "0.9"
-ansi-to-tui = "8.0"
+ansi-to-tui = { version = "8.0", default-features = false }
 
 [lints]
 workspace = true
