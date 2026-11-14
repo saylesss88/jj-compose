@@ -16,7 +16,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::patch::{FileDiff, Patch};
+use crate::{
+    Result,
+    patch::{FileDiff, Patch},
+};
 
 /// jj leaves this in the right-hand tree to explain the editor's job; it
 /// isn't part of the change.
@@ -27,7 +30,7 @@ const INSTRUCTIONS: &str = "JJ-INSTRUCTIONS";
 /// # Errors
 ///
 /// If the trees can't be read or written.
-pub fn apply_selection(patch_text: &str, left: &Path, right: &Path) -> io::Result<()> {
+pub fn apply_selection(patch_text: &str, left: &Path, right: &Path) -> Result<()> {
     let _ = fs::remove_file(right.join(INSTRUCTIONS));
     let patch = Patch::from_text(patch_text);
 
@@ -41,11 +44,12 @@ pub fn apply_selection(patch_text: &str, left: &Path, right: &Path) -> io::Resul
 }
 
 /// Write one file's before-state plus the patch's hunks for it.
-fn write_chosen(patch: &Patch, file: &FileDiff, left: &Path, right: &Path) -> io::Result<()> {
+fn write_chosen(patch: &Patch, file: &FileDiff, left: &Path, right: &Path) -> Result<()> {
     let target = right.join(&file.path);
     // A patch that deletes the file has nothing to write.
     if (file.header.clone()).any(|l| patch.line(l) == "+++ /dev/null") {
-        return remove(&target);
+        remove(&target)?;
+        return Ok(());
     }
     // Absent from `left` means the change adds it, so it starts from nothing.
     let before = read_lines(&left.join(&file.path))?;
@@ -58,7 +62,8 @@ fn write_chosen(patch: &Patch, file: &FileDiff, left: &Path, right: &Path) -> io
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&target, text)
+    fs::write(&target, text)?;
+    Ok(())
 }
 
 /// Whether the file ends in a newline once the patch is applied: it does
@@ -81,7 +86,7 @@ fn ends_with_newline(patch: &Patch, file: &FileDiff) -> bool {
 
 /// Make every file the patch didn't mention match its before-state, so jj
 /// sees no change to it.
-fn reset_rest(left: &Path, right: &Path, chosen: &[&str]) -> io::Result<()> {
+fn reset_rest(left: &Path, right: &Path, chosen: &[&str]) -> Result<()> {
     for path in relative_files(left)? {
         if chosen.iter().any(|c| Path::new(c) == path) {
             continue;
@@ -104,7 +109,7 @@ fn reset_rest(left: &Path, right: &Path, chosen: &[&str]) -> io::Result<()> {
 }
 
 /// Every file under `root`, as paths relative to it.
-fn relative_files(root: &Path) -> io::Result<Vec<PathBuf>> {
+fn relative_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
@@ -123,17 +128,17 @@ fn relative_files(root: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 /// The file's lines, or none at all if it doesn't exist.
-fn read_lines(path: &Path) -> io::Result<Vec<String>> {
+fn read_lines(path: &Path) -> Result<Vec<String>> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(text.lines().map(str::to_owned).collect()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(e),
+        Err(e) => Err(e.into()),
     }
 }
 
-fn remove(path: &Path) -> io::Result<()> {
+fn remove(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
     }
 }
@@ -219,4 +224,3 @@ diff --git a/new.txt b/new.txt
         assert!(!text.contains("seven"), "{text}");
     }
 }
-

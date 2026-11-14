@@ -5,13 +5,12 @@
 //! description and writing it back.
 
 use std::{
-    error::Error,
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
-type Result<T> = std::result::Result<T, Box<dyn Error>>;
+use crate::{Error, Result};
 
 /// How to invoke `jj`: which repository to operate on.
 #[derive(Debug, Clone, Default)]
@@ -57,13 +56,17 @@ impl Jj {
             .args(args)
             .arg("--no-pager")
             .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("failed to run jj: {e}"))?;
+            .output()?;
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stderr = stderr.trim();
-            // We add our own prefix; don't print `jj-compose: Error: ...`.
-            return Err(stderr.strip_prefix("Error: ").unwrap_or(stderr).into());
+            let clean_stderr = stderr.strip_prefix("Error: ").unwrap_or(stderr);
+
+            return Err(Error::CommandFailed {
+                args: args.join(" "),
+                stderr: clean_stderr.to_owned(),
+            });
         }
         Ok(output.stdout)
     }
@@ -93,20 +96,17 @@ impl Jj {
         let stdout = String::from_utf8(stdout)?;
         let mut lines = stdout.lines();
         let (Some(line), None) = (lines.next(), lines.next()) else {
-            return Err(format!("revset `{revset}` must resolve to exactly one revision").into());
+            return Err(Error::AmbiguousRevset(revset.to_owned()));
         };
 
         let mut parts = line.split('\t');
         let (Some(commit_id), Some(change), Some(change_id), Some(mutability)) =
             (parts.next(), parts.next(), parts.next(), parts.next())
         else {
-            return Err(format!("unexpected output from jj log: {line:?}").into());
+            return Err(Error::UnexpectedOutput(line.to_owned()));
         };
         if mutability == "immutable" {
-            return Err(format!(
-                "change {change_id} is immutable; jj describe would refuse to rewrite it"
-            )
-            .into());
+            return Err(Error::ImmutableRevision(change_id.to_owned()));
         }
 
         Ok(Target {
@@ -169,9 +169,13 @@ impl Jj {
             // the paths in the diff are relative to.
             cmd.arg("--").arg(format!("root-file:{path:?}"));
         }
-        let status = cmd.status().map_err(|e| format!("failed to run jj: {e}"))?;
+        let status = cmd.status()?;
+
         if !status.success() {
-            return Err(format!("jj diff failed ({status})").into());
+            return Err(Error::CommandFailed {
+                args: format!("diff -r {} --tool {}", target.commit_id, tool),
+                stderr: format!("Process exited with {status}"),
+            });
         }
         Ok(())
     }
@@ -229,17 +233,31 @@ impl Jj {
             .command()
             .args(["describe", &target.change, "--stdin"])
             .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("failed to run jj: {e}"))?;
+            .spawn()?;
+        // .map_err(|e| format!("failed to run jj: {e}"))?;
         child
             .stdin
             .take()
-            .ok_or("jj stdin unavailable")?
+            .ok_or(Error::StdinUnavailable)?
             .write_all(message.as_bytes())?;
         let status = child.wait()?;
         if !status.success() {
-            return Err(format!("jj describe failed ({status})").into());
+            // return Err(format!("jj describe failed ({status})").into());
+            return Err(Error::CommandFailed {
+                args: format!("describe {} --stdin", target.change),
+                stderr: format!("Process exited with {status}"),
+            });
         }
         Ok(())
+    }
+
+    /// Print the diff in colored git format
+    ///
+    /// # Errors
+    ///
+    /// If there is no jj repo found at target
+    /// If the underlying jj command fails
+    pub fn git_diff(&self, target: &Target) -> Result<Vec<u8>> {
+        self.output(&["diff", "-r", &target.commit_id, "--git", "--color=always"])
     }
 }

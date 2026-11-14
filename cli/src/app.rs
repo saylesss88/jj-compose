@@ -25,10 +25,13 @@ use ratatui_textarea::{CursorMove, Input, TextArea, WrapMode};
 
 use crate::{
     diff::{self, DiffView, HunkEntry},
+    vim::{self, Dir, Vim},
+};
+
+use jj_compose_core::{
     jj::{Jj, Target},
     message::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT},
     patch::HunkId,
-    vim::{self, Dir, Vim},
 };
 
 /// Which key bindings the editor uses.

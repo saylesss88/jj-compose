@@ -1,0 +1,16 @@
+[package]
+name = "jj-compose"
+version.workspace = true
+edition.workspace = true
+readme.workspace = true
+
+[dependencies]
+jj-compose-core = { path = "../core" }
+anyhow = "1.0"
+clap = { version = "4", features = ["derive", "env"] }
+ratatui = "0.30"
+ratatui-textarea = "0.9"
+ansi-to-tui = "8.0"
+
+[lints]
+workspace = true

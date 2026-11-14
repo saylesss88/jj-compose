@@ -21,7 +21,7 @@
 //! fields reproduces it byte for byte, so opening and saving a message
 //! never rewrites it behind the user's back.
 
-use std::fmt;
+use thiserror::Error;
 
 /// Header length (`type(scope): subject`) most style guides aim for.
 pub const HEADER_SOFT_LIMIT: usize = 50;
@@ -106,25 +106,17 @@ impl Field {
 }
 
 /// Why a message couldn't be split into fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum ParseError {
-    /// The first line isn't `type(scope)!: subject`.
+    #[error("the first line isn't `type(scope): subject`")]
     Header,
-    /// The header and body aren't separated by a blank line.
-    NoBlankLine,
-    /// The fields can't reproduce the message exactly (unusual spacing,
-    /// sections out of order, ...).
-    NotLossless,
-}
 
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Header => "the first line isn't `type(scope): subject`",
-            Self::NoBlankLine => "there's no blank line after the first line",
-            Self::NotLossless => "the form can't reproduce its exact layout",
-        })
-    }
+    #[error("there's no blank line after the first line")]
+    NoBlankLine,
+
+    #[error("the form can't reproduce its exact layout")]
+    NotLossless,
 }
 
 /// The text of each field.

@@ -4,6 +4,10 @@
 //! See `message` for the message format and how existing descriptions are
 //! parsed without being rewritten.
 
+mod app;
+mod diff;
+mod vim;
+
 use std::{
     error::Error,
     fs, io, panic,
@@ -17,10 +21,10 @@ use ratatui::crossterm::{
     execute,
 };
 
-use jj_compose::app::{App, Exit, Keymap, Session};
-use jj_compose::diff;
-use jj_compose::jj::Jj;
-use jj_compose::split;
+use jj_compose_core::jj::Jj;
+use jj_compose_core::split;
+
+use crate::app::{App, Exit, Keymap, Session};
 
 /// Write a Conventional Commit description for a jj change.
 #[derive(Debug, Parser)]

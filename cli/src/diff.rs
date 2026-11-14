@@ -1,8 +1,9 @@
 //! The diff pane: loading `jj diff` output and scrolling through it.
 
-use std::{error::Error, iter, ops::Range};
+use std::{iter, ops::Range};
 
 use ansi_to_tui::IntoText;
+use anyhow::{Context, Result, anyhow};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -11,7 +12,7 @@ use ratatui::{
     widgets::{Block, Paragraph},
 };
 
-use crate::{
+use jj_compose_core::{
     jj::{Jj, Target},
     patch::{self, FileDiff, HunkId, Patch},
 };
@@ -28,9 +29,8 @@ const TAB_WIDTH: usize = 4;
 /// Returns an error if:
 /// * Executing the underlying `jj diff` command fails or returns a non-zero exit status.
 /// * Parsing the generated git diff output and its ANSI escape sequences into a `DiffView` fails.
-pub fn load(jj: &Jj, target: &Target) -> Result<DiffView, Box<dyn Error>> {
-    let rev = target.commit_id.as_str();
-    let stdout = jj.output(&["diff", "-r", rev, "--git", "--color=always"])?;
+pub fn load(jj: &Jj, target: &Target) -> Result<DiffView> {
+    let stdout = jj.git_diff(target).map_err(|e| anyhow!("{e}"))?;
     let empty = format!("(no changes in {})", target.change_id);
     DiffView::from_output(&stdout, &empty)
 }
@@ -116,13 +116,18 @@ impl DiffView {
     /// # Errors
     ///
     /// If the colors in `output` can't be parsed.
-    pub fn from_output(output: &[u8], empty: &str) -> Result<Self, Box<dyn Error>> {
+    pub fn from_output(output: &[u8], empty: &str) -> Result<Self> {
         let expanded = expand_tabs(output);
-        let styled = expanded.into_text()?.lines;
+        let styled = expanded
+            .into_text()
+            .context("Failed to parse ANSI colors in diff output")?
+            .lines;
+
         let plain: Vec<String> = patch::strip_ansi(&String::from_utf8_lossy(&expanded))
             .lines()
             .map(str::to_owned)
             .collect();
+
         let patch = Patch::new(plain);
 
         let mut view = Self {
