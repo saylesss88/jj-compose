@@ -113,8 +113,8 @@ struct Split {
     paths: Vec<String>,
     /// The hunk being decided; past the end once they all have been.
     at: usize,
-    /// Whether each hunk was added, parallel to `ids`.
-    chosen: Vec<bool>,
+    /// Whether each hunk is marked, parallel to `ids`.
+    marked: Vec<bool>,
 }
 
 impl Split {
@@ -125,50 +125,80 @@ impl Split {
             ids: hunks.iter().map(|h| h.id).collect(),
             paths: hunks.iter().map(|h| h.path.clone()).collect(),
             at: 0,
-            chosen: vec![false; hunks.len()],
+            marked: vec![false; hunks.len()],
         })
     }
 
-    const fn done(&self) -> bool {
-        self.at >= self.ids.len()
-    }
-
-    fn decide(&mut self, add: bool) {
-        if let Some(slot) = self.chosen.get_mut(self.at) {
-            *slot = add;
+    /// Move without deciding anything, stopping at either end.
+    const fn next(&mut self) {
+        if self.at + 1 < self.ids.len() {
             self.at += 1;
         }
     }
 
-    /// Decide this hunk and every later one in the same file alike.
-    fn decide_file(&mut self, add: bool) {
-        let Some(path) = self.paths.get(self.at).cloned() else {
-            return;
-        };
-        while self.paths.get(self.at).is_some_and(|p| *p == path) {
-            self.decide(add);
+    const fn prev(&mut self) {
+        self.at = self.at.saturating_sub(1);
+    }
+
+    fn mark(&mut self, on: bool) {
+        if let Some(slot) = self.marked.get_mut(self.at) {
+            *slot = on;
         }
     }
 
-    /// Go back to the previous hunk to decide it again.
-    const fn back(&mut self) {
-        self.at = self.at.saturating_sub(1);
+    fn toggle(&mut self) {
+        self.mark(!self.is_marked());
+    }
+
+    /// Mark or unmark every hunk in the file on screen, wherever it sits.
+    fn mark_file(&mut self, on: bool) {
+        let Some(path) = self.paths.get(self.at).cloned() else {
+            return;
+        };
+        for i in 0..self.paths.len() {
+            if self.paths[i] == path {
+                self.marked[i] = on;
+            }
+        }
+    }
+
+    fn mark_all(&mut self, on: bool) {
+        self.marked.fill(on);
+    }
+
+    fn is_marked(&self) -> bool {
+        self.marked.get(self.at).copied().unwrap_or(false)
+    }
+
+    /// One character per hunk, so the shape of the change is visible at a
+    /// glance without leaving the hunk on screen.
+    fn strip(&self) -> String {
+        self.marked
+            .iter()
+            .enumerate()
+            .map(|(i, &on)| match (i == self.at, on) {
+                (true, true) => '#',
+                (true, false) => 'o',
+                (false, true) => '+',
+                (false, false) => '·',
+            })
+            .collect()
     }
 
     fn picked(&self) -> Vec<HunkId> {
         self.ids
             .iter()
-            .zip(&self.chosen)
-            .filter(|&(_, add)| *add)
+            .zip(&self.marked)
+            .filter(|&(_, on)| *on)
             .map(|(&id, _)| id)
             .collect()
     }
 
     fn count(&self) -> usize {
-        self.chosen.iter().filter(|&&add| add).count()
+        self.marked.iter().filter(|&&on| on).count()
     }
 
-    /// Whether every hunk was added, which is a description, not a split.
+    /// Whether every hunk is marked, which is a description, not a split.
     fn is_everything(&self) -> bool {
         self.count() == self.ids.len()
     }
@@ -346,7 +376,7 @@ impl App {
     /// The pane, the status hint and the key routing all ask this, so none of
     /// them can show one mode while another acts on a different one.
     fn choosing(&self) -> bool {
-        self.focus == Focus::Diff && self.split.as_ref().is_some_and(|s| !s.done())
+        self.focus == Focus::Diff && self.split.is_some()
     }
 
     /// Show `split`'s current hunk and hand it the keys.
@@ -376,14 +406,14 @@ impl App {
         self.status = Some(Status::Info("Left split mode.".into()));
     }
 
-    /// Every hunk decided: go write the message for the ones added.
-    fn finish_choosing(&mut self) {
-        let added = self.split.as_ref().map_or(0, Split::count);
+    /// Leave the hunks marked as they are and go write the message.
+    fn write_message(&mut self) {
+        let marked = self.split.as_ref().map_or(0, Split::count);
         self.zoomed = false;
         self.focus = Focus::Editor;
         self.status = Some(Status::Info(format!(
-            "{added} {} added. Write the message, then ^s to commit them.",
-            plural(added, "hunk")
+            "{marked} {} marked. Write the message, then ^s to commit them.",
+            plural(marked, "hunk")
         )));
     }
 
@@ -411,24 +441,34 @@ impl App {
                 self.cancel_split();
                 return None;
             }
+            // Done marking, whether or not every hunk has been seen.
+            KeyCode::Enter => {
+                self.write_message();
+                return None;
+            }
             _ => {}
         }
-
         let split = self.split.as_mut()?;
         match code {
-            KeyCode::Char('y' | ' ') => split.decide(true),
-            KeyCode::Char('n') => split.decide(false),
-            KeyCode::Char('a') => split.decide_file(true),
-            KeyCode::Char('d') => split.decide_file(false),
-            KeyCode::Char('u') | KeyCode::Backspace => split.back(),
-            // Stop here and describe what has been added so far.
-            KeyCode::Enter => split.at = split.ids.len(),
+            KeyCode::Char(' ') => split.toggle(),
+            // `y` and `n` read as they do in `git add -p`, except that
+            // neither is final: an unmarked hunk can be marked later.
+            KeyCode::Char('y') => {
+                split.mark(true);
+                split.next();
+            }
+            KeyCode::Char('n' | '}') | KeyCode::Right => split.next(),
+            KeyCode::Char('p' | '{') | KeyCode::Left => split.prev(),
+            KeyCode::Char('a') => split.mark_file(true),
+            KeyCode::Char('d') => split.mark_file(false),
+            KeyCode::Char('A') => split.mark_all(true),
+            KeyCode::Char('C') => split.mark_all(false),
+            KeyCode::Char('g') => split.at = 0,
+            KeyCode::Char('G') => split.at = split.ids.len() - 1,
             _ => return None,
         }
 
-        if self.split.as_ref().is_some_and(Split::done) {
-            self.finish_choosing();
-        } else if let Some(at) = self.split.as_ref().map(|s| s.at) {
+        if let Some(at) = self.split.as_ref().map(|s| s.at) {
             self.diff.show_hunk(at);
         }
         None
@@ -883,15 +923,23 @@ impl App {
                 split.ids.len(),
                 split.paths[split.at].clone(),
                 split.count(),
+                split.strip(),
+                split.is_marked(),
             )),
             _ => None,
         };
-        if let Some((at, total, path, added)) = splitting {
+        if let Some((at, total, path, marked, strip, on)) = splitting {
             let title = Line::from(vec![
                 Span::raw(format!(" Split {} ", self.change_id)),
                 Span::raw(format!("· hunk {}/{total} ", at + 1)),
                 Span::raw(format!("· {path} ")),
-                Span::styled(format!("· {added} added "), Color::Green),
+                // The strip is every hunk at once: `#` here and marked, `o`
+                // here and not, `+` marked elsewhere, `·` not.
+                Span::styled(format!("· [{strip}] "), Color::Cyan),
+                Span::styled(
+                    format!("· {marked} marked "),
+                    if on { Color::Green } else { Color::DarkGray },
+                ),
             ]);
             let block = pane(title, Some(accent));
             self.diff.render_hunk(frame, diff_area, block, at);
@@ -1492,53 +1540,6 @@ index 3333333..4444444 100644
         alt(&mut app, 's');
         assert!(app.split.is_none());
         assert!(matches!(app.status, Some(Status::Error(_))));
-    }
-
-    #[test]
-    fn y_adds_a_hunk_and_n_leaves_it_behind() {
-        let mut app = splitting_app();
-        alt(&mut app, 's');
-        press(&mut app, KeyCode::Char('y'));
-        press(&mut app, KeyCode::Char('n'));
-        let split = app.split.as_ref().unwrap();
-        assert_eq!(split.chosen, [true, false, false]);
-        assert_eq!(split.at, 2);
-        assert_eq!(split.count(), 1);
-    }
-
-    #[test]
-    fn u_goes_back_to_change_a_decision() {
-        let mut app = splitting_app();
-        alt(&mut app, 's');
-        press(&mut app, KeyCode::Char('y'));
-        press(&mut app, KeyCode::Char('u'));
-        press(&mut app, KeyCode::Char('n'));
-        let split = app.split.as_ref().unwrap();
-        assert!(!split.chosen[0], "the decision was replaced");
-        assert_eq!(split.at, 1);
-    }
-
-    #[test]
-    fn a_decides_the_rest_of_the_file_at_once() {
-        let mut app = splitting_app();
-        alt(&mut app, 's');
-        press(&mut app, KeyCode::Char('a'));
-        let split = app.split.as_ref().unwrap();
-        // Both of a.rs's hunks, and not b.rs's.
-        assert_eq!(split.chosen, [true, true, false]);
-        assert_eq!(split.at, 2, "stopped at the next file");
-    }
-
-    #[test]
-    fn deciding_every_hunk_moves_on_to_the_message() {
-        let mut app = splitting_app();
-        alt(&mut app, 's');
-        for _ in 0..3 {
-            press(&mut app, KeyCode::Char('y'));
-        }
-        assert!(app.split.as_ref().unwrap().done());
-        assert_eq!(app.focus, Focus::Editor);
-        assert!(!app.zoomed);
     }
 
     /// A split left mid-decision must keep the keys with the diff pane; the
