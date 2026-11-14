@@ -37,11 +37,13 @@ impl Split {
     }
 
     /// The hunk being looked at, counted from zero.
+    #[must_use]
     pub const fn at(&self) -> usize {
         self.at
     }
 
     /// How many hunks the change has. Never fewer than two.
+    #[must_use]
     pub const fn total(&self) -> usize {
         self.ids.len()
     }
@@ -52,6 +54,7 @@ impl Split {
     }
 
     /// Whether each hunk is marked, in the order the hunks appear.
+    #[must_use]
     pub fn marks(&self) -> &[bool] {
         &self.marked
     }
@@ -102,6 +105,7 @@ impl Split {
         self.marked.fill(on);
     }
 
+    #[must_use]
     pub fn is_marked(&self) -> bool {
         self.marked.get(self.at).copied().unwrap_or(false)
     }
@@ -110,6 +114,7 @@ impl Split {
     /// at a glance while only one hunk is on screen: `#` the hunk being
     /// looked at and marked, `o` it and unmarked, `+` marked elsewhere, `·`
     /// untouched.
+    #[must_use]
     pub fn strip(&self) -> String {
         self.marked
             .iter()
@@ -124,6 +129,7 @@ impl Split {
     }
 
     /// The marked hunks, for [`Patch::subset`](crate::Patch::subset).
+    #[must_use]
     pub fn picked(&self) -> Vec<HunkId> {
         self.ids
             .iter()
@@ -133,12 +139,14 @@ impl Split {
             .collect()
     }
 
+    #[must_use]
     pub fn count(&self) -> usize {
         self.marked.iter().filter(|&&on| on).count()
     }
 
     /// Whether every hunk is marked, which is a description, not a split:
     /// nothing would be left behind.
+    #[must_use]
     pub fn is_everything(&self) -> bool {
         self.count() == self.ids.len()
     }
