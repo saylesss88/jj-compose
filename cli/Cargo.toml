@@ -6,6 +6,7 @@ readme.workspace = true
 authors.workspace = true
 exclude.workspace = true
 documentation.workspace = true
+description.workspace = true
 keywords.workspace = true
 repository.workspace = true
 

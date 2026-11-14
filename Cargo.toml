@@ -8,6 +8,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["T. Sawyer <saylesss87@proton.me>"]
 documentation = "https://docs.rs/jj-compose"
+description = "Easily split big jujutsu working copy changes into atomic commits"
 license = "Apache-2.0"
 repository = "https://github.com/saylesss88/jj-compose"
 keywords = ["jujutsu", "commits", "changes"]
