@@ -128,9 +128,9 @@ shows which file is at the top, how many there are, and the current search.
   contain a capital letter.
 - **Zoom:** `z` gives the diff the whole window, until you move back to the
   form.
-- **Splitting:** `s` (or `Alt-s` from the form) walks the change one hunk at a
-  time, so each piece can be committed with its own message. See
-  [Splitting a change](#splitting-a-change).
+- **Splitting:** `s` (or `Alt-s` from the form) reads the change one hunk at a
+  time and marks the ones to commit together, so each piece gets its own
+  message. See [Splitting a change](#splitting-a-change).
 - **Stale diff:** when you're describing `@`, editing a file that's in the diff
   (in another terminal or your editor) flags the pane `stale: r to reload`
   within a second. `r` reloads it and keeps your place and search. New files
@@ -242,26 +242,41 @@ Insert mode uses the default keymap's editing keys.
 ## Splitting a change
 
 A change that does three things needs three messages. `Alt-s` (or `s` in the
-diff pane) walks the change one hunk at a time, filling the pane with just that
-hunk and asking whether it belongs in the commit you are about to write:
+diff pane) fills the pane with one hunk at a time so each can be read on its
+own, and you mark the ones that belong together.
 
-| Key                            | Action                                     |
-| ------------------------------ | ------------------------------------------ |
-| `y`, `Space`                   | Add this hunk to the commit                |
-| `n`                            | Leave it for what remains of the change    |
-| `a`                            | Add this hunk and the rest of the file     |
-| `d`                            | Skip this hunk and the rest of the file    |
-| `u`, `Backspace`               | Back up and decide the previous hunk again |
-| `Enter`                        | Stop here and describe what has been added |
-| `Esc`, `q`                     | Leave split mode, deciding nothing         |
-| `j` / `k`, `Ctrl-d` / `Ctrl-u` | Scroll inside a hunk taller than the pane  |
+Moving decides nothing. Nothing is final until you commit, so you can read the
+whole change first and then mark it, which is usually the only way to see what
+actually goes together:
 
-The pane's title tracks where you are: `hunk 3/7 · src/app.rs · 2 added`.
+| Key                             | Action                                     |
+| ------------------------------- | ------------------------------------------ |
+| `Space`                         | Mark or unmark the hunk on screen          |
+| `n` / `p`, `}` / `{`, `→` / `←` | Next / previous hunk                       |
+| `g` / `G`                       | First / last hunk                          |
+| `y`                             | Mark this hunk and move to the next        |
+| `a` / `d`                       | Mark / unmark every hunk in this file      |
+| `A` / `C`                       | Mark every hunk / clear every mark         |
+| `Enter`                         | Done marking; go write the message         |
+| `Esc`, `q`                      | Leave split mode, discarding the marks     |
+| `j` / `k`, `Ctrl-d` / `Ctrl-u`  | Scroll inside a hunk taller than the pane  |
 
-Once every hunk is decided the form takes focus again. Write the message for the
-hunks you added and press `Ctrl-s`: those hunks become their own commit, and
-jj-compose reopens on what is left of the change, ready for the next message.
-Repeat until nothing is left.
+The pane's title tracks both where you are and the shape of the whole change:
+
+```text
+ Split xuurlzoz · hunk 2/5 · src/app.rs · [+o··+] · 2 marked
+```
+
+In that strip there is one character per hunk: `#` the current hunk, marked;
+`o` the current hunk, unmarked; `+` marked elsewhere; `·` untouched.
+
+`Enter` hands the keys back to the form with the marks held. Write the message
+for the marked hunks and press `Ctrl-s`: those hunks become their own commit,
+and jj-compose reopens on what is left of the change, ready for the next
+message. Repeat until nothing is left.
+
+While a split is pending the form's status bar says so — `^s commit 2 hunks`
+rather than `^s save` — and `Alt-←` goes back to the hunks to change the marks.
 
 This needs no configuration. jj-compose runs itself as jj's diff editor, passing
 the tool on `jj split`'s own command line, so `ui.diff-editor` is neither read
@@ -272,8 +287,8 @@ The description carries over to the remainder, as it does with `jj split`, so
 the form starts out holding the original message. Clear the parts that belong to
 the piece you just committed.
 
-Adding every hunk is a description rather than a split, so `Ctrl-s` then behaves
-exactly as it does outside split mode.
+Marking every hunk is a description rather than a split, so `Ctrl-s` then
+behaves exactly as it does outside split mode.
 
 Hunks are the smallest unit: there is no splitting a hunk by line, and a binary
 file has no hunks at all, so its change always stays with the remainder. A
