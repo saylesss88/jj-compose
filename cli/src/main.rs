@@ -21,8 +21,7 @@ use ratatui::crossterm::{
     execute,
 };
 
-use jj_compose_core::jj::Jj;
-use jj_compose_core::split;
+use jj_compose_core::{Jj, split};
 
 use crate::app::{App, Exit, Keymap, Session};
 

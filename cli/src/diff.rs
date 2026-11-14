@@ -12,10 +12,7 @@ use ratatui::{
     widgets::{Block, Paragraph},
 };
 
-use jj_compose_core::{
-    jj::{Jj, Target},
-    patch::{self, FileDiff, HunkId, Patch},
-};
+use jj_compose_core::{FileDiff, HunkId, Jj, Patch, Target, patch};
 
 /// Columns a tab advances to. Terminal tab stops are every 8 columns, but
 /// diffs are already indented by line numbers, so a narrower stop keeps
