@@ -233,6 +233,7 @@ pub struct App {
     target: Target,
     /// The split being composed, if any.
     split: Option<Split>,
+    is_vertical: bool,
 }
 
 impl App {
@@ -279,6 +280,7 @@ impl App {
             pending: None,
             target,
             split: None,
+            is_vertical: false,
         }
     }
 
@@ -288,7 +290,11 @@ impl App {
     /// Returns an [`io::Error`] if drawing the UI frame to the terminal fails, or
     /// if reading the underlying terminal events (such as keystrokes) fails.
     pub fn run(mut self, terminal: &mut DefaultTerminal, jj: &Jj) -> io::Result<(Exit, Target)> {
+        const VERTICAL_BREAKPOINT: u16 = 120;
         loop {
+            let size = terminal.size()?;
+            self.is_vertical = size.width < VERTICAL_BREAKPOINT;
+
             terminal.draw(|frame| self.draw(frame))?;
 
             let exit = match event::read()? {
@@ -841,14 +847,33 @@ impl App {
     fn neighbor(&self, dir: Dir) -> Option<Stop> {
         use Field::{Scope, Subject, Trailers, Type};
         if self.view == View::Raw {
-            return (dir == Dir::Left).then_some(Stop::Diff);
+            return if self.is_vertical {
+                (dir == Dir::Up).then_some(Stop::Diff)
+            } else {
+                (dir == Dir::Left).then_some(Stop::Diff)
+            };
         }
+
         let field = match (dir, self.field) {
-            (Dir::Up, Type | Scope) | (Dir::Down, Trailers) => {
-                return None;
+            (Dir::Up, Type | Scope) => {
+                return if self.is_vertical {
+                    Some(Stop::Diff)
+                } else {
+                    None
+                };
             }
+            (Dir::Down, Trailers) => return None,
+
             (Dir::Right, _) if self.field != Type => return None,
-            (Dir::Left, f) if f != Scope => return Some(Stop::Diff),
+
+            (Dir::Left, f) if f != Scope => {
+                return if self.is_vertical {
+                    None
+                } else {
+                    Some(Stop::Diff)
+                };
+            }
+
             (Dir::Up, Subject) => self.top_field,
             (Dir::Down, Type | Scope) => Subject,
             (Dir::Left, _) => Type,
