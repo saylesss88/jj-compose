@@ -24,11 +24,11 @@ use ratatui::{
 use ratatui_textarea::{CursorMove, Input, TextArea, WrapMode};
 
 use crate::{
-    diff::{self, DiffView, HunkEntry},
+    diff::{self, DiffView},
     vim::{self, Dir, Vim},
 };
 
-use jj_compose_core::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT, HunkId, Jj, Target};
+use jj_compose_core::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT, Jj, Split, Target};
 
 /// Which key bindings the editor uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -99,109 +99,6 @@ pub enum Request {
     OpenDiff { path: Option<String> },
     /// Commit the hunks chosen in split mode, described by `message`.
     Split { message: String },
-}
-
-/// Walking the diff one hunk at a time, choosing what goes in this commit.
-///
-/// The hunks are decided in order, like `git add -p`: each is either added
-/// to the commit being written or left for what remains of the change.
-#[derive(Debug, Clone)]
-struct Split {
-    /// Every hunk in the diff, in the order they appear.
-    ids: Vec<HunkId>,
-    /// The file each hunk belongs to, for "the rest of this file".
-    paths: Vec<String>,
-    /// The hunk being decided; past the end once they all have been.
-    at: usize,
-    /// Whether each hunk is marked, parallel to `ids`.
-    marked: Vec<bool>,
-}
-
-impl Split {
-    /// `None` when there is nothing to split: a single hunk would leave one
-    /// of the two commits empty whichever way it went.
-    fn new(hunks: &[HunkEntry]) -> Option<Self> {
-        (hunks.len() > 1).then(|| Self {
-            ids: hunks.iter().map(|h| h.id).collect(),
-            paths: hunks.iter().map(|h| h.path.clone()).collect(),
-            at: 0,
-            marked: vec![false; hunks.len()],
-        })
-    }
-
-    /// Move without deciding anything, stopping at either end.
-    const fn next(&mut self) {
-        if self.at + 1 < self.ids.len() {
-            self.at += 1;
-        }
-    }
-
-    const fn prev(&mut self) {
-        self.at = self.at.saturating_sub(1);
-    }
-
-    fn mark(&mut self, on: bool) {
-        if let Some(slot) = self.marked.get_mut(self.at) {
-            *slot = on;
-        }
-    }
-
-    fn toggle(&mut self) {
-        self.mark(!self.is_marked());
-    }
-
-    /// Mark or unmark every hunk in the file on screen, wherever it sits.
-    fn mark_file(&mut self, on: bool) {
-        let Some(path) = self.paths.get(self.at).cloned() else {
-            return;
-        };
-        for i in 0..self.paths.len() {
-            if self.paths[i] == path {
-                self.marked[i] = on;
-            }
-        }
-    }
-
-    fn mark_all(&mut self, on: bool) {
-        self.marked.fill(on);
-    }
-
-    fn is_marked(&self) -> bool {
-        self.marked.get(self.at).copied().unwrap_or(false)
-    }
-
-    /// One character per hunk, so the shape of the change is visible at a
-    /// glance without leaving the hunk on screen.
-    fn strip(&self) -> String {
-        self.marked
-            .iter()
-            .enumerate()
-            .map(|(i, &on)| match (i == self.at, on) {
-                (true, true) => '#',
-                (true, false) => 'o',
-                (false, true) => '+',
-                (false, false) => '·',
-            })
-            .collect()
-    }
-
-    fn picked(&self) -> Vec<HunkId> {
-        self.ids
-            .iter()
-            .zip(&self.marked)
-            .filter(|&(_, on)| *on)
-            .map(|(&id, _)| id)
-            .collect()
-    }
-
-    fn count(&self) -> usize {
-        self.marked.iter().filter(|&&on| on).count()
-    }
-
-    /// Whether every hunk is marked, which is a description, not a split.
-    fn is_everything(&self) -> bool {
-        self.count() == self.ids.len()
-    }
 }
 
 pub struct App {
@@ -367,7 +264,7 @@ impl App {
         self.view = view;
         self.original = original;
         self.field = Field::Type;
-        if let Some(split) = Split::new(self.diff.hunks()) {
+        if let Some(split) = Split::new(self.diff.hunks().iter().map(|h| (h.id, h.path.clone()))) {
             self.enter_split(split);
         } else {
             self.split = None;
@@ -387,7 +284,7 @@ impl App {
 
     /// Show `split`'s current hunk and hand it the keys.
     fn enter_split(&mut self, split: Split) {
-        self.diff.show_hunk(split.at);
+        self.diff.show_hunk(split.at());
         self.split = Some(split);
         self.focus = Focus::Diff;
         self.zoomed = true;
@@ -395,7 +292,7 @@ impl App {
 
     /// Start choosing hunks for a commit, showing the first on its own.
     fn start_split(&mut self) {
-        match Split::new(self.diff.hunks()) {
+        match Split::new(self.diff.hunks().iter().map(|h| (h.id, h.path.clone()))) {
             Some(split) => self.enter_split(split),
             None => {
                 self.status = Some(Status::Error(
@@ -469,12 +366,12 @@ impl App {
             KeyCode::Char('d') => split.mark_file(false),
             KeyCode::Char('A') => split.mark_all(true),
             KeyCode::Char('C') => split.mark_all(false),
-            KeyCode::Char('g') => split.at = 0,
-            KeyCode::Char('G') => split.at = split.ids.len() - 1,
+            KeyCode::Char('g') => split.first(),
+            KeyCode::Char('G') => split.last(),
             _ => return None,
         }
 
-        if let Some(at) = self.split.as_ref().map(|s| s.at) {
+        if let Some(at) = self.split.as_ref().map(Split::at) {
             self.diff.show_hunk(at);
         }
         None
@@ -944,9 +841,9 @@ impl App {
         // While splitting, the pane is one hunk and a tally, not the diff.
         let splitting = match &self.split {
             Some(split) if self.choosing() => Some((
-                split.at,
-                split.ids.len(),
-                split.paths[split.at].clone(),
+                split.at(),
+                split.total(),
+                split.path().to_owned(),
                 split.count(),
                 split.strip(),
                 split.is_marked(),
@@ -1544,8 +1441,8 @@ index 3333333..4444444 100644
         let mut app = splitting_app();
         alt(&mut app, 's');
         let split = app.split.as_ref().expect("split mode");
-        assert_eq!(split.ids.len(), 3);
-        assert_eq!(split.at, 0);
+        assert_eq!(split.total(), 3);
+        assert_eq!(split.at(), 0);
         assert_eq!(app.focus, Focus::Diff);
         assert!(app.zoomed, "one hunk fills the pane");
     }
@@ -1574,13 +1471,15 @@ index 3333333..4444444 100644
     #[test]
     fn a_split_in_progress_always_has_the_keys() {
         let mut app = splitting_app();
-        app.enter_split(Split::new(app.diff.hunks()).unwrap());
+        app.enter_split(
+            Split::new(app.diff.hunks().iter().map(|h| (h.id, h.path.clone()))).unwrap(),
+        );
         assert_eq!(app.focus, Focus::Diff);
         assert!(app.choosing());
 
         press(&mut app, KeyCode::Char('y'));
         assert_eq!(
-            app.split.as_ref().unwrap().at,
+            app.split.as_ref().unwrap().at(),
             1,
             "y decided a hunk rather than being typed"
         );
@@ -1601,68 +1500,7 @@ index 3333333..4444444 100644
         app.focus_diff();
         assert!(app.choosing());
         press(&mut app, KeyCode::Char('n'));
-        assert_eq!(app.split.as_ref().unwrap().at, 1);
-    }
-
-    #[test]
-    fn space_marks_the_hunk_on_screen_and_moving_decides_nothing() {
-        let mut app = splitting_app();
-        alt(&mut app, 's');
-        press(&mut app, KeyCode::Char(' '));
-        press(&mut app, KeyCode::Char('n'));
-        press(&mut app, KeyCode::Char('n'));
-        let split = app.split.as_ref().unwrap();
-        assert_eq!(split.marked, [true, false, false]);
-        assert_eq!(split.at, 2, "moving past hunks left them unmarked");
-    }
-
-    /// The point of the whole design: a hunk you passed over can be read
-    /// again and marked once you have seen the rest.
-    #[test]
-    fn a_hunk_can_be_revisited_and_its_mark_changed() {
-        let mut app = splitting_app();
-        alt(&mut app, 's');
-        press(&mut app, KeyCode::Char('n'));
-        press(&mut app, KeyCode::Char('n'));
-        press(&mut app, KeyCode::Char('g'));
-        assert_eq!(app.split.as_ref().unwrap().at, 0);
-        press(&mut app, KeyCode::Char(' '));
-        assert_eq!(app.split.as_ref().unwrap().marked, [true, false, false]);
-        press(&mut app, KeyCode::Char(' '));
-        assert_eq!(app.split.as_ref().unwrap().marked, [false, false, false]);
-    }
-
-    #[test]
-    fn marks_survive_a_trip_through_every_hunk() {
-        let mut app = splitting_app();
-        alt(&mut app, 's');
-        press(&mut app, KeyCode::Char(' '));
-        press(&mut app, KeyCode::Char('G'));
-        press(&mut app, KeyCode::Char('g'));
-        assert!(app.split.as_ref().unwrap().is_marked());
-        assert_eq!(app.split.as_ref().unwrap().count(), 1);
-    }
-
-    #[test]
-    fn a_marks_every_hunk_in_the_file_on_screen() {
-        let mut app = splitting_app();
-        alt(&mut app, 's');
-        press(&mut app, KeyCode::Char('a'));
-        // Both of a.rs's hunks, and not b.rs's.
-        assert_eq!(app.split.as_ref().unwrap().marked, [true, true, false]);
-        assert_eq!(app.split.as_ref().unwrap().at, 0, "marking does not move");
-        press(&mut app, KeyCode::Char('d'));
-        assert_eq!(app.split.as_ref().unwrap().marked, [false, false, false]);
-    }
-
-    #[test]
-    fn capital_a_and_c_mark_and_clear_everything() {
-        let mut app = splitting_app();
-        alt(&mut app, 's');
-        press(&mut app, KeyCode::Char('A'));
-        assert!(app.split.as_ref().unwrap().is_everything());
-        press(&mut app, KeyCode::Char('C'));
-        assert_eq!(app.split.as_ref().unwrap().count(), 0);
+        assert_eq!(app.split.as_ref().unwrap().at(), 1);
     }
 
     #[test]
@@ -1679,16 +1517,6 @@ index 3333333..4444444 100644
             1,
             "the marks are still held"
         );
-    }
-
-    #[test]
-    fn the_strip_shows_every_hunk_and_where_you_are() {
-        let mut app = splitting_app();
-        alt(&mut app, 's');
-        press(&mut app, KeyCode::Char(' '));
-        press(&mut app, KeyCode::Char('n'));
-        // Marked and elsewhere, here and unmarked, untouched.
-        assert_eq!(app.split.as_ref().unwrap().strip(), "+o·");
     }
 
     #[test]

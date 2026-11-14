@@ -5,7 +5,7 @@ edition.workspace = true
 readme.workspace = true
 
 [dependencies]
-jj-compose-core = { path = "../core" }
+jj-compose-core = { path = "../core", version = "0.1.0" }
 anyhow = "1.0"
 clap = { version = "4", features = ["derive", "env"] }
 ratatui = "0.30"
