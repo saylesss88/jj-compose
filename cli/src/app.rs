@@ -209,7 +209,7 @@ impl App {
         const VERTICAL_BREAKPOINT: u16 = 120;
 
         // Said before any work is done, not after it is wasted.
-        self.status = self.immutable_warning().or(self.status.take());
+        self.status = self.immutable_warning().or_else(|| self.status.take());
         loop {
             let size = terminal.size()?;
             self.is_vertical = size.width < VERTICAL_BREAKPOINT;
