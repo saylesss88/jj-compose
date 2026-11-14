@@ -320,23 +320,30 @@ change with only one hunk can't be split.
 
 ## Rewriting released history
 
-By default a revision jj protects as immutable — a tagged release, anything on
-trunk — is refused before the TUI opens. `--ignore-immutable` passes jj's own
-flag of that name through to every command, so such a revision can be split
-like any other.
+<!--prettier-ignore-->
+> [!WARNING]
+> **Do not rewrite commits that others rely on.** Since jj marks pushed commits
+> as immutable, this flag exists to let you rewrite them. Only do this if you
+> are absolutely certain no one else has pulled these commits, and be prepared
+> to forcefully push the rewritten tags.
 
-Two things happen when you do, and jj-compose can reverse neither:
+By default a revision jj protects as immutable: a tagged release, anything on
+trunk, is refused before the TUI opens. `--ignore-immutable` passes jj's own
+flag of that name through to every command, so such a revision can be split like
+any other.
+
+Two things happen when you do, and jj-compose can reverse **neither**:
 
 - **Every tag on that revision or after it is stranded**, left pointing at a
-  commit that is now hidden. Splitting is worse than describing here: one
-  commit becomes two, so there is no mechanical answer to where the tag
-  belongs. jj-compose suggests the remainder, since that is the commit holding
-  the whole of the original content. Tags on *ancestors* are untouched.
+  commit that is now hidden. Splitting is worse than describing here: one commit
+  becomes two, so there is no mechanical answer to where the tag belongs.
+  jj-compose suggests the remainder, since that is the commit holding the whole
+  of the original content. Tags on _ancestors_ are untouched.
 - **Every later commit gets a new hash**, because jj rebases the descendants.
 
-So the mode is loud about it. The pane title carries `· immutable` for the
-whole session, the status bar names the tags at risk before any work is done,
-and on exit jj-compose prints what to run:
+So the mode is loud about it. The pane title carries `· immutable` for the whole
+session, the status bar names the tags at risk before any work is done, and on
+exit jj-compose prints what to run:
 
 ```text
 Rewriting immutable history left these tags behind:
@@ -345,15 +352,15 @@ Rewriting immutable history left these tags behind:
   git push origin v0.1.0 --force
 ```
 
-The `git push` is there because `jj git push` cannot force-push a tag; that
-one step has to go through git.
+The `git push` is there because `jj git push` cannot force-push a tag; that one
+step has to go through git.
 
-Think twice before using this on anything already published. If a release is
-on crates.io, rewriting its commit makes your history disagree with the
-tarball, and you then maintain that disagreement through force-pushed tags and
-a regenerated changelog. The honest use is a release made minutes ago that
-nobody has pulled — and for that, `jj op restore` is usually cleaner still,
-since it rolls the tag back too instead of leaving you to re-anchor it.
+Think twice before using this on anything already published. If a release is on
+crates.io, rewriting its commit makes your history disagree with the tarball,
+and you then maintain that disagreement through force-pushed tags and a
+regenerated changelog. The honest use is a release made minutes ago that nobody
+has pulled, and for that, `jj op restore` is usually cleaner still, since it
+rolls the tag back too instead of leaving you to re-anchor it.
 
 ## External diff tools
 
