@@ -1,5 +1,9 @@
-//! Core library of `jj-compose`
-//! jj wrapper, Conventional Commit message model, and diff/hunk splitting
+//! Core library of `jj-compose`: a `jj` wrapper, the Conventional Commit
+//! message model, and splitting a change into hunks.
+//!
+//! See [`message`] for the message format and how existing descriptions are
+//! parsed without being rewritten, [`patch`] and [`marks`] for choosing part
+//! of a change, and [`split`] for writing that choice back out.
 
 pub mod error;
 pub mod jj;
