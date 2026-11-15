@@ -74,14 +74,14 @@ impl App {
     }
 
     /// The whole change as a list, in place of the single hunk.
-    fn draw_overview(&mut self, frame: &mut Frame<'_>, area: Rect, status: Rect, accent: Color) {
+    fn draw_overview(&self, frame: &mut Frame<'_>, area: Rect, status: Rect, accent: Color) {
         let Some(cursor) = self.overview else {
             return;
         };
         let rows = self.overview_rows();
         let assigned = self.split.as_ref().map_or(0, Split::assigned);
         let hunks = rows.iter().filter(|r| r.hunk.is_some()).count();
-        let boxes = self.split.as_ref().map(Split::pending).unwrap_or_default();
+        let boxes = self.split.as_ref().map_or_default(Split::pending);
         let title = Line::from(vec![
             Span::raw(format!(" Hunks in {} ", self.change_id)),
             immutable_marker(self.target.immutable),
@@ -138,10 +138,7 @@ impl App {
             // one left behind, and brackets round the one on screen.
             Span::styled(format!("· {strip} "), Color::Cyan),
             Span::styled(
-                match commit {
-                    Some(n) => format!("· commit {n} "),
-                    None => "· unassigned ".to_owned(),
-                },
+                commit.map_or_else(|| "· unassigned ".to_owned(), |n| format!("· commit {n} ")),
                 if commit.is_some() {
                     Color::Green
                 } else {

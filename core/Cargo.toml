@@ -10,7 +10,7 @@ exclude.workspace = true
 categories.workspace = true
 
 [dependencies]
-thiserror = "1.0"
+thiserror = "2.0"
 
 [lints]
 workspace = true

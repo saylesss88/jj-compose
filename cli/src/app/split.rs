@@ -166,14 +166,13 @@ impl App {
 
     /// Leave the plan as it is and go write the next commit's message.
     fn write_message(&mut self) {
-        let (commit, held, planned) = match self.split.as_ref() {
-            Some(split) => (
+        let (commit, held, planned) = self.split.as_ref().map_or((0, 0, 0), |split| {
+            (
                 split.next_box().unwrap_or(0),
                 split.next_box().map_or(0, |n| split.count(n)),
                 split.pending().len(),
-            ),
-            None => (0, 0, 0),
-        };
+            )
+        });
         self.zoomed = false;
         self.focus = Focus::Editor;
         self.status = Some(Status::Info(if planned == 0 {
