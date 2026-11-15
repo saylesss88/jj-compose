@@ -441,4 +441,4 @@ would pick it up and do nothing useful. Set `--diff-tool` or
 
 ## License
 
-Apache-2.0
+[Apache-2.0](https://github.com/saylesss88/jj-compose/blob/main/LICENSE)

@@ -10,20 +10,20 @@ consumer, but nothing here assumes one.
 
 ## Requirements
 
-The `jj` binary must be on `PATH`. Everything in [`jj`] shells out to it
-rather than linking against `jj-lib`, so this crate stays small and tracks
-whatever `jj` the user already has.
+The `jj` binary must be on `PATH`. Everything in [`jj`] shells out to it rather
+than linking against `jj-lib`, so this crate stays small and tracks whatever
+`jj` the user already has.
 
 ## What's in it
 
-| Module | What it does |
-| ------ | ------------ |
-| `jj` | Run `jj` commands against one resolved revision: read its description and diff, describe it, split it |
-| `message` | Parse and render `type(scope): subject` messages with `Problem:`/`Solution:` sections and trailers |
-| `patch` | Parse a git-format diff into files and hunks, and build a patch of a chosen subset |
-| `marks` | Track which hunks the user picked, independently of where they are in the diff |
-| `split` | Write a chosen subset into the two trees `jj split -i` hands a diff editor |
-| `error` | One `Error` enum, and a `Result` alias |
+| Module    | What it does                                                                                          |
+| --------- | ----------------------------------------------------------------------------------------------------- |
+| `jj`      | Run `jj` commands against one resolved revision: read its description and diff, describe it, split it |
+| `message` | Parse and render `type(scope): subject` messages with `Problem:`/`Solution:` sections and trailers    |
+| `patch`   | Parse a git-format diff into files and hunks, and build a patch of a chosen subset                    |
+| `marks`   | Track which hunks the user picked, independently of where they are in the diff                        |
+| `split`   | Write a chosen subset into the two trees `jj split -i` hands a diff editor                            |
+| `error`   | One `Error` enum, and a `Result` alias                                                                |
 
 ## Describing a change
 
@@ -54,19 +54,19 @@ fn retitle() -> Result<()> {
 ```
 
 `Draft::parse` is deliberately strict. It returns `Err` unless the form can
-reproduce the message byte for byte, so round-tripping an existing
-description never silently rewrites it. `build()` validates the result and
-returns the message text.
+reproduce the message byte for byte, so round-tripping an existing description
+never silently rewrites it. `build()` validates the result and returns the
+message text.
 
 `resolve` refuses an immutable revision unless the `Jj` was built with
 `ignoring_immutable(true)`; see `orphaned_tags` for what rewriting one costs.
 
 ## Choosing hunks
 
-`Patch` parses a diff and `Split` holds the plan: which of several commits
-each hunk is destined for. The two are separate on purpose — position and
-plan are independent, so a caller can read the whole change before deciding
-any of it, and move a hunk between commits until the split is made.
+`Patch` parses a diff and `Split` holds the plan: which of several commits each
+hunk is destined for. The two are separate on purpose — position and plan are
+independent, so a caller can read the whole change before deciding any of it,
+and move a hunk between commits until the split is made.
 
 ```rust
 use jj_compose_core::{Jj, Patch, Result, Split, patch};
@@ -100,21 +100,20 @@ fn first_commits_patch() -> Result<String> {
 }
 ```
 
-`strip_ansi` is there because `git_diff` asks `jj` for color, so the caller
-gets the user's own diff colors; the escape codes have to come off before
-parsing.
+`strip_ansi` is there because `git_diff` asks `jj` for color, so the caller gets
+the user's own diff colors; the escape codes have to come off before parsing.
 
 Splitting a change into more than two commits means committing one box, then
 re-finding the rest: a `HunkId` only means anything within one diff, and
-committing part of a change shifts every later hunk's line numbers. Use
-[`Plan`] to carry the remaining boxes across — it keys them by each hunk's
-text, which a split leaves untouched.
+committing part of a change shifts every later hunk's line numbers. Use [`Plan`]
+to carry the remaining boxes across — it keys them by each hunk's text, which a
+split leaves untouched.
 
 ## Splitting
 
-`jj split -i` runs a diff editor with two directories: `left` holds the files
-as they were, `right` as they are. Whatever the editor leaves in `right`
-becomes the first of two commits.
+`jj split -i` runs a diff editor with two directories: `left` holds the files as
+they were, `right` as they are. Whatever the editor leaves in `right` becomes
+the first of two commits.
 
 `Jj::split` drives that, pointing `jj` at an executable you supply as the diff
 editor. The usual arrangement is for a binary to re-run itself in a mode that
@@ -141,10 +140,10 @@ fn commit_marked(jj: &Jj, target: &Target, message: &str, subset: &str) -> Resul
 
 Two things worth knowing about the result:
 
-- The commit that was split off **keeps the original change ID**; the
-  remainder gets a new one and inherits the description. The remainder is
-  reachable as `<change>+`, which holds even when the change already had
-  descendants, since they get rebased onto it.
+- The commit that was split off **keeps the original change ID**; the remainder
+  gets a new one and inherits the description. The remainder is reachable as
+  `<change>+`, which holds even when the change already had descendants, since
+  they get rebased onto it.
 - Files the patch doesn't mention are reset to their before-state in `right`,
   which is how `jj` is told those changes belong in the other commit.
   `apply_selection` handles that, along with added files, deleted files and
@@ -163,9 +162,9 @@ rather than this crate guessing at presentation.
 
 No rendering, no key handling, no terminal. Those live in the `jj-compose`
 binary. Hunks are also the smallest unit here: there's no splitting a hunk by
-line, and a binary file has no hunks, so its change can't be separated from
-the rest.
+line, and a binary file has no hunks, so its change can't be separated from the
+rest.
 
 ## License
 
-Apache-2.0
+[Apache-2.0](https://github.com/saylesss88/jj-compose/blob/main/LICENSE)
