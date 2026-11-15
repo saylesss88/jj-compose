@@ -59,6 +59,12 @@ diff.
 cargo install jj-compose
 ```
 
+Install the pre-compiled binary with `cargo-binstall`:
+
+```sh
+cargo binstall jj-compose
+```
+
 Add an alias so it runs as `jj compose`:
 
 ```toml
@@ -72,6 +78,48 @@ To always use the Vim keymap, add it to the alias:
 ```toml
 compose = ["util", "exec", "--", "jj-compose", "--keymap", "vim"]
 ```
+
+---
+
+## Quick start
+
+You've been working for an hour and `@` now holds a bug fix, a refactor, and a
+docs tweak. That's one change with three commits' worth of work in it. Run:
+
+```sh
+jj compose
+```
+
+1. **Press `Alt-s`.** The diff pane switches to split mode and shows one hunk at
+   a time.
+2. **Press `f`** to see every hunk in the change at once, with the function each
+   one sits in.
+3. **Assign hunks with digits.** Move with `j`/`k` and press `1` on each hunk
+   that belongs to the fix and `2` on each one that belongs to the refactor.
+   Leave the docs hunks unassigned so they stay in the remainder. Lower numbers
+   are committed first, so `1` becomes the earliest commit. Nothing is final
+   yet: press a digit again or `0` to take a hunk back out.
+4. **Press `Enter`** to go to the form. The status bar shows
+   `Describing commit 1 of 3`.
+5. **Write the message and press `Ctrl-s`.** jj-compose commits those hunks,
+   reopens on what's left, and moves on to commit 2. Do the same for that one.
+6. **Describe the remainder last.** The docs tweak is all that's left, and its
+   message goes on `@`.
+
+The result:
+
+```text
+@  docs: clarify empty-input behavior
+○  refactor(lexer): extract token helpers
+○  fix(parser): return no tokens for empty input
+```
+
+You get three atomic commits, ordered so each one builds, and you never left the
+terminal or touched `ui.diff-editor`.
+
+If you change your mind partway through, press `Alt-←` to go back to the hunks
+and change the marks. To make a single commit with no split, skip `Alt-s`, fill
+in the form, and press `Ctrl-s`.
 
 ## Usage
 
@@ -270,24 +318,24 @@ diff pane) fills the pane with one hunk at a time so each can be read on its
 own, and you mark the ones that belong together.
 
 Moving decides nothing, and nothing is final until you commit. Hunks go into
-numbered boxes, one per commit you mean to make, and you can move a hunk
-between them or take it out again right up to the split:
+numbered boxes, one per commit you mean to make, and you can move a hunk between
+them or take it out again right up to the split:
 
-| Key                             | Action                                     |
-| ------------------------------- | ------------------------------------------ |
-| `1`–`9`                         | Put this hunk in that commit               |
-| the same digit again, or `0`    | Take it back out                           |
-| `n` / `p`, `}` / `{`, `→` / `←` | Next / previous hunk                       |
-| `g` / `G`                       | First / last hunk                          |
+| Key                             | Action                                                     |
+| ------------------------------- | ---------------------------------------------------------- |
+| `1`–`9`                         | Put this hunk in that commit                               |
+| the same digit again, or `0`    | Take it back out                                           |
+| `n` / `p`, `}` / `{`, `→` / `←` | Next / previous hunk                                       |
+| `g` / `G`                       | First / last hunk                                          |
 | `a` / `d`                       | Put the rest of this file in the same commit / take it out |
-| `f`                             | Show the whole change as a list            |
-| `Enter`                         | Done planning; go write the messages       |
-| `Esc`, `q`                      | Leave split mode, discarding the plan      |
-| `j` / `k`, `Ctrl-d` / `Ctrl-u`  | Scroll inside a hunk taller than the pane  |
+| `f`                             | Show the whole change as a list                            |
+| `Enter`                         | Done planning; go write the messages                       |
+| `Esc`, `q`                      | Leave split mode, discarding the plan                      |
+| `j` / `k`, `Ctrl-d` / `Ctrl-u`  | Scroll inside a hunk taller than the pane                  |
 
 **The numbering is the order.** Boxes are committed lowest first, so putting a
-hunk in commit 1 makes it the earliest commit regardless of where it sits in
-the diff. That is how you order a decomposition so each commit builds.
+hunk in commit 1 makes it the earliest commit regardless of where it sits in the
+diff. That is how you order a decomposition so each commit builds.
 
 The title carries the whole plan while only one hunk is on screen:
 
@@ -298,8 +346,8 @@ The title carries the whole plan while only one hunk is on screen:
 A digit per hunk, `·` for one staying behind, and brackets round the hunk you
 are looking at.
 
-`f` swaps the single hunk for the whole change at once, which is usually how
-you work out what belongs together:
+`f` swaps the single hunk for the whole change at once, which is usually how you
+work out what belongs together:
 
 ```text
 ┌ Hunks in wvkqrwwn · 3 of 6 assigned · 2 commits ┐
@@ -315,35 +363,34 @@ you work out what belongs together:
 └─────────────────────────────────────────────────┘
 ```
 
-Each file heading carries its totals and how many of its hunks are spoken for
-— `1 of 3 assigned` is what tells you a file you thought you had finished
-still has something left in it. Each hunk row gives its commit, its line
-number, its size, and the definition it sits in.
+Each file heading carries its totals and how many of its hunks are spoken for —
+`1 of 3 assigned` is what tells you a file you thought you had finished still
+has something left in it. Each hunk row gives its commit, its line number, its
+size, and the definition it sits in.
 
 The cursor in the list and the hunk on screen are the same cursor, so `j`/`k`
-move both and every assigning key works the same in either view. `Enter`, `f`
-or `Esc` goes back to reading whichever hunk the cursor was left on.
+move both and every assigning key works the same in either view. `Enter`, `f` or
+`Esc` goes back to reading whichever hunk the cursor was left on.
 
-The enclosing definition is worked out from the file rather than read out of
-the diff, because `jj diff --git` omits it where `git diff` includes it. It
-uses git's own language-agnostic rule — the nearest line starting in the
-first column — so in prose files it reports whatever line happens to sit
-above, which is noise rather than a signal.
+The enclosing definition is worked out from the file rather than read out of the
+diff, because `jj diff --git` omits it where `git diff` includes it. It uses
+git's own language-agnostic rule, the nearest line starting in the first column
+— so in prose files it reports whatever line happens to sit above, which is
+noise rather than a signal.
 
 `Enter` hands the keys back to the form, which then describes one commit at a
 time: write the message for commit 1 and press `Ctrl-s`, and jj-compose makes
-it, reopens on what is left with an empty form, and moves on to commit 2.
-The status bar says which one you are on — `Describing commit 2 of 3: 2
-hunks` — and so does the form's key hint.
+it, reopens on what is left with an empty form, and moves on to commit 2. The
+status bar says which one you are on, `Describing commit 2 of 3: 2 hunks`, and
+so does the form's key hint.
 
-Boxes survive being committed even though the hunks' positions do not: the
-plan is keyed by each hunk's text, because committing part of a change shifts
-every later hunk's line numbers. Whatever you left unassigned stays behind in
-the final change, which keeps the original description and which you describe
-last.
+Boxes survive being committed even though the hunks' positions do not: the plan
+is keyed by each hunk's text, because committing part of a change shifts every
+later hunk's line numbers. Whatever you left unassigned stays behind in the
+final change, which keeps the original description and which you describe last.
 
-While a split is pending the form's status bar says so — `^s commit 2 hunks`
-rather than `^s save` — and `Alt-←` goes back to the hunks to change the marks.
+While a split is pending the form's status bar says so. `^s commit 2 hunks`
+rather than `^s save`, and `Alt-←` goes back to the hunks to change the marks.
 
 This needs no configuration. jj-compose runs itself as jj's diff editor, passing
 the tool on `jj split`'s own command line, so `ui.diff-editor` is neither read
@@ -355,14 +402,13 @@ the form starts out holding the original message. Clear the parts that belong to
 the piece you just committed.
 
 Putting every hunk in one box leaves nothing behind, so that is a description
-rather than a split and `Ctrl-s` behaves exactly as it does outside split
-mode.
+rather than a split and `Ctrl-s` behaves exactly as it does outside split mode.
 
 Hunks are the smallest unit: there is no splitting a hunk by line, and a binary
 file has no hunks at all, so its change always stays with the remainder. A
-change with only one hunk can't be split, which is also why the last box
-needs no split of its own — once everything else is committed, what is left
-*is* that commit.
+change with only one hunk can't be split, which is also why the last box needs
+no split of its own — once everything else is committed, what is left _is_ that
+commit.
 
 ## Rewriting released history
 
