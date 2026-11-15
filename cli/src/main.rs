@@ -29,7 +29,7 @@ use crate::app::{App, Exit, Keymap, Outcome, Session};
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Args {
-    /// The revision to describe [default: @]
+    /// The revision to describe default: @
     #[arg(value_name = "REVSET", conflicts_with = "revision")]
     revset: Option<String>,
 

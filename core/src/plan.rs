@@ -1,6 +1,6 @@
 //! Carrying a split plan across a split.
 //!
-//! A [`HunkId`] says where a hunk sits in one particular diff, so it does not
+//! A [`crate::HunkId`] says where a hunk sits in one particular diff, so it does not
 //! survive committing part of the change: the remainder is diffed against a
 //! new parent, and every later hunk's line numbers shift. What does survive
 //! is the hunk's own text — the context and `+`/`-` lines are byte for byte

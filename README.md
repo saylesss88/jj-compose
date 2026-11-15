@@ -1,5 +1,11 @@
 # jj-compose
 
+<p align="center">
+  <a href="https://crates.io/crates/jj-compose"><img src="https://img.shields.io/crates/v/jj-compose.svg" alt="crates.io"></a>
+  <a href="https://docs.rs/jj_release_core"><img src="https://img.shields.io/docsrs/jj_compose_core" alt="docs.rs"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/crates/l/jj-compose.svg" alt="License"></a>
+</p>
+
 An interactive terminal UI for Jujutsu ([jj](https://jj-vcs.github.io/jj/)) that
 helps you split working-copy changes into atomic, structured
 [Conventional Commits](https://www.conventionalcommits.org/) while viewing the
