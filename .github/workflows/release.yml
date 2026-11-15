@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 jobs:
   build:
@@ -51,4 +52,3 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: jj-release-${{ matrix.target }}.tar.gz
-
