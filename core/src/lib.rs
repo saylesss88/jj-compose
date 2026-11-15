@@ -9,8 +9,10 @@ pub mod error;
 pub mod jj;
 pub mod marks;
 pub mod message;
+pub mod overview;
 pub mod patch;
 pub mod split;
+pub mod symbols;
 
 pub use error::{Error, Result};
 pub use jj::{Jj, TaggedCommit, Target};

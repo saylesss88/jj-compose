@@ -26,6 +26,8 @@ pub struct Hunk {
     /// The lines this hunk replaces in the file as it was before the change:
     /// `a` and `b` of `@@ -a,b +c,d @@`, as a 0-based range.
     pub old: Range<usize>,
+    /// The lines it occupies in the file as it is after: `c` and `d`.
+    pub new: Range<usize>,
 }
 
 /// Which hunk, in a particular [`Patch`].
@@ -35,13 +37,14 @@ pub struct HunkId {
     pub hunk: usize,
 }
 
-/// The `a,b` of a `@@ -a,b +c,d @@` line as a 0-based range. A missing count
-/// means one line, and `-0,0` (a new file) means an empty range at the start.
-fn old_range(header: &str) -> Range<usize> {
+/// One side's `a,b` from a `@@ -a,b +c,d @@` line, as a 0-based range. A
+/// missing count means one line, and a count of zero (a file being created
+/// or deleted) means an empty range at that point.
+fn side_range(header: &str, sign: char) -> Range<usize> {
     let field = header
         .split_whitespace()
-        .nth(1)
-        .and_then(|f| f.strip_prefix('-'))
+        .nth(if sign == '-' { 1 } else { 2 })
+        .and_then(|f| f.strip_prefix(sign))
         .unwrap_or("1");
     let (start, count) = field.split_once(',').unwrap_or((field, "1"));
     let start: usize = start.parse().unwrap_or(1);
@@ -77,7 +80,8 @@ pub fn parse<S: AsRef<str>>(lines: &[S]) -> Vec<FileDiff> {
             file.hunks.push(Hunk {
                 header: i,
                 lines: i + 1..i + 1,
-                old: old_range(line),
+                old: side_range(line, '-'),
+                new: side_range(line, '+'),
             });
         } else if let Some(hunk) = file.hunks.last_mut() {
             hunk.lines.end = i + 1;

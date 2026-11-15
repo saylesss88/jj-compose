@@ -1,12 +1,12 @@
 //! Turning application state into a frame.
 
-use jj_compose_core::{Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT, Split};
+use jj_compose_core::{Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT, Split, overview};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::Block,
+    widgets::{Block, Paragraph},
 };
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
@@ -42,6 +42,35 @@ impl App {
             )),
             _ => None,
         };
+        if let Some(cursor) = self.overview.filter(|_| self.choosing()) {
+            let rows = self.overview_rows();
+            let marked = self.split.as_ref().map_or(0, Split::count);
+            let hunks = rows.iter().filter(|r| r.hunk.is_some()).count();
+            let title = Line::from(vec![
+                Span::raw(format!(" Hunks in {} ", self.change_id)),
+                immutable_marker(self.target.immutable),
+                Span::styled(format!("· {marked} of {hunks} marked "), Color::Green),
+            ]);
+            let block = pane(title, Some(accent));
+            let inner = block.inner(diff_area);
+            frame.render_widget(block, diff_area);
+            let height = usize::from(inner.height).max(1);
+            // Keep the cursor in view without a scrollbar's worth of state.
+            let top = cursor
+                .saturating_sub(height / 2)
+                .min(rows.len().saturating_sub(height));
+            let lines: Vec<Line<'static>> = rows
+                .iter()
+                .enumerate()
+                .skip(top)
+                .take(height)
+                .map(|(i, row)| overview_line(row, i == cursor))
+                .collect();
+            frame.render_widget(Paragraph::new(lines), inner);
+            frame.render_widget(self.status_line(), status);
+            return;
+        }
+
         if let Some((at, total, path, marked, strip, on)) = splitting {
             let mut title = vec![
                 Span::raw(format!(" Split {} ", self.change_id)),
@@ -166,6 +195,11 @@ impl App {
             }
             None => {}
         }
+        if self.overview.is_some() && self.choosing() {
+            let keys =
+                " Space mark · j/k row · a/d file · A/C all · Enter read it · f close · Esc leave";
+            return Line::from(vec![Span::raw(keys).dark_gray()]);
+        }
         if self.choosing() {
             let keys = " Space mark · n/p hunk · a/d file · A/C all · Enter message · Esc leave";
             return Line::from(vec![Span::raw(keys).dark_gray()]);
@@ -265,6 +299,23 @@ fn header_counter(len: usize) -> Span<'static> {
 }
 
 /// `n` with `word` pluralised the easy way.
+/// One row of the overview: a file heading, or a hunk marked or not.
+fn overview_line(row: &overview::Row, cursor: bool) -> Line<'static> {
+    let color = match row.kind {
+        overview::Kind::File => Color::Cyan,
+        overview::Kind::Marked => Color::Green,
+        overview::Kind::Unmarked => Color::Gray,
+    };
+    let mut style = Style::new().fg(color);
+    if row.kind == overview::Kind::File {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if cursor {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
+    Line::styled(format!(" {}", row.text), style)
+}
+
 /// A standing reminder that this session is rewriting protected history, so
 /// it can't be forgotten three splits in. Empty when it isn't.
 pub(super) fn immutable_marker(immutable: bool) -> Span<'static> {

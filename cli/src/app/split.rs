@@ -4,8 +4,82 @@ use crate::{
 };
 
 impl App {
+    /// Walking the list: the cursor skips file headings, and moving it moves
+    /// the hunk on screen, so marking always acts on what you are looking at.
+    fn overview_key(&mut self, code: KeyCode) -> Option<Exit> {
+        let rows = self.overview_rows();
+        let at = self.overview?;
+        let step = |from: usize, down: bool| {
+            let mut i = from;
+            loop {
+                let next = if down { i + 1 } else { i.checked_sub(1)? };
+                if next >= rows.len() {
+                    return None;
+                }
+                i = next;
+                if rows[i].hunk.is_some() {
+                    return Some(i);
+                }
+            }
+        };
+        match code {
+            // `Enter` goes back to reading the hunk under the cursor; the
+            // others just close the list. Same effect, since the cursor has
+            // been moving the hunk on screen all along.
+            KeyCode::Char('f' | 'q') | KeyCode::Esc | KeyCode::Enter => self.overview = None,
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(i) = step(at, true) {
+                    self.overview = Some(i);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(i) = step(at, false) {
+                    self.overview = Some(i);
+                }
+            }
+            KeyCode::Char('g') => self.overview = rows.iter().position(|r| r.hunk.is_some()),
+            KeyCode::Char('G') => self.overview = rows.iter().rposition(|r| r.hunk.is_some()),
+            // Marking works exactly as it does on the hunk itself.
+            KeyCode::Char(' ') => self.split.as_mut()?.toggle(),
+            KeyCode::Char('y') => self.split.as_mut()?.mark(true),
+            KeyCode::Char('n') => self.split.as_mut()?.mark(false),
+            KeyCode::Char('a') => self.split.as_mut()?.mark_file(true),
+            KeyCode::Char('d') => self.split.as_mut()?.mark_file(false),
+            KeyCode::Char('A') => self.split.as_mut()?.mark_all(true),
+            KeyCode::Char('C') => self.split.as_mut()?.mark_all(false),
+            _ => return None,
+        }
+        // Keep the hunk on screen in step with the row under the cursor.
+        if let (Some(at), Some(split)) = (self.overview, self.split.as_mut()) {
+            if let Some(id) = rows.get(at).and_then(|r| r.hunk) {
+                split.go_to(id);
+            }
+            let hunk = split.at();
+            self.diff.show_hunk(hunk);
+        }
+        None
+    }
+
     /// Deciding one hunk at a time: add it, skip it, or move around.
     pub(super) fn split_key(&mut self, code: KeyCode, ctrl: bool) -> Option<Exit> {
+        if self.overview.is_some() {
+            return self.overview_key(code);
+        }
+        // Opening the list needs the symbols, which cost a subprocess each.
+        if code == KeyCode::Char('f') {
+            let rows = self.overview_rows();
+            let at = self.split.as_ref().map_or(0, Split::at);
+            self.overview = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.hunk.is_some())
+                .nth(at)
+                .map(|(i, _)| i);
+            if self.symbols.is_empty() {
+                self.pending = Some(app::Request::Symbols);
+            }
+            return None;
+        }
         // Scrolling, for a hunk taller than the pane.
         match code {
             KeyCode::Char('d') if ctrl => {

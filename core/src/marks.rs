@@ -78,6 +78,17 @@ impl Split {
         self.at = self.ids.len().saturating_sub(1);
     }
 
+    /// Move to a particular hunk, if the change still has it.
+    ///
+    /// This is what lets an overview share one cursor with the hunk view:
+    /// moving in the list moves the hunk on screen, so marking always acts
+    /// on the thing you are looking at.
+    pub fn go_to(&mut self, id: HunkId) {
+        if let Some(i) = self.ids.iter().position(|&h| h == id) {
+            self.at = i;
+        }
+    }
+
     pub fn mark(&mut self, on: bool) {
         if let Some(slot) = self.marked.get_mut(self.at) {
             *slot = on;
@@ -170,6 +181,15 @@ mod tests {
     fn a_single_hunk_cannot_be_split() {
         assert!(Split::new([(HunkId { file: 0, hunk: 0 }, "a.rs".to_owned())]).is_none());
         assert!(Split::new([]).is_none());
+    }
+
+    #[test]
+    fn go_to_moves_to_a_named_hunk_and_ignores_an_unknown_one() {
+        let mut s = split();
+        s.go_to(HunkId { file: 1, hunk: 0 });
+        assert_eq!(s.at(), 2);
+        s.go_to(HunkId { file: 9, hunk: 9 });
+        assert_eq!(s.at(), 2, "an unknown hunk leaves the cursor alone");
     }
 
     #[test]

@@ -278,12 +278,45 @@ actually goes together:
 | `Space`                         | Mark or unmark the hunk on screen         |
 | `n` / `p`, `}` / `{`, `→` / `←` | Next / previous hunk                      |
 | `g` / `G`                       | First / last hunk                         |
+| `f`                             | Show the whole change as a list           |
 | `y`                             | Mark this hunk and move to the next       |
 | `a` / `d`                       | Mark / unmark every hunk in this file     |
 | `A` / `C`                       | Mark every hunk / clear every mark        |
 | `Enter`                         | Done marking; go write the message        |
 | `Esc`, `q`                      | Leave split mode, discarding the marks    |
 | `j` / `k`, `Ctrl-d` / `Ctrl-u`  | Scroll inside a hunk taller than the pane |
+
+`f` swaps the single hunk for the whole change at once, which is usually how
+you work out what belongs together:
+
+```text
+┌ Hunks in wvkqrwwn · 1 of 6 marked ──────────────┐
+│ README.md  +1 -1  1 of 1 marked                 │
+│ +  8    +1   -1  line CHANGED                   │
+│ cli/src/app.rs  +2 -2  0 of 2 marked            │
+│    1    +1   -1  impl App                       │
+│   18    +1   -1  fn plural()                    │
+│ core/src/jj.rs  +3 -3  0 of 3 marked            │
+│    1    +1   -1  fn resolve()                   │
+│   14    +1   -1  fn describe()                  │
+│   28    +1   -1  fn split_change()              │
+└─────────────────────────────────────────────────┘
+```
+
+Each file heading carries its totals and how many of its hunks are marked —
+`1 of 3 marked` is what tells you a file you thought you had finished still
+has something left in it. Each hunk row gives its line number, its size, and
+the definition it sits in.
+
+The cursor in the list and the hunk on screen are the same cursor, so `j`/`k`
+move both and every marking key works the same in either view. `Enter`, `f`
+or `Esc` goes back to reading whichever hunk the cursor was left on.
+
+The enclosing definition is worked out from the file rather than read out of
+the diff, because `jj diff --git` omits it where `git diff` includes it. It
+uses git's own language-agnostic rule — the nearest line starting in the
+first column — so in prose files it reports whatever line happens to sit
+above, which is noise rather than a signal.
 
 The pane's title tracks both where you are and the shape of the whole change:
 

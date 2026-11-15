@@ -19,7 +19,7 @@ use crate::{
     vim::{self, Dir, Vim},
 };
 
-use jj_compose_core::{Draft, Field, Jj, Split, TaggedCommit, Target};
+use jj_compose_core::{Draft, Field, Jj, Split, TaggedCommit, Target, overview};
 
 /// Which key bindings the editor uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -95,6 +95,8 @@ pub enum Request {
     OpenDiff { path: Option<String> },
     /// Commit the hunks chosen in split mode, described by `message`.
     Split { message: String },
+    /// Work out which definition each hunk sits in, for the overview.
+    Symbols,
 }
 
 pub struct App {
@@ -126,6 +128,12 @@ pub struct App {
     target: Target,
     /// The split being composed, if any.
     split: Option<Split>,
+    /// The whole change as a list, with the row the cursor is on. `None`
+    /// while reading hunks one at a time.
+    pub(super) overview: Option<usize>,
+    /// The definition each hunk sits in, parallel to the diff's hunks.
+    /// Empty until [`Request::Symbols`] has been carried out.
+    pub(super) symbols: Vec<Option<String>>,
     /// Tags that a rewrite would strand, and the commands to put them back.
     at_risk: Vec<TaggedCommit>,
     recovery: Vec<String>,
@@ -176,6 +184,8 @@ impl App {
             pending: None,
             target,
             split: None,
+            overview: None,
+            symbols: Vec::new(),
             at_risk: session.at_risk,
             recovery: Vec::new(),
             is_vertical: false,
@@ -221,6 +231,12 @@ impl App {
                 self.perform(terminal, jj, &request)?;
             }
         }
+    }
+
+    /// The whole change as rows, for the overview.
+    pub(super) fn overview_rows(&self) -> Vec<overview::Row> {
+        let marks = self.split.as_ref().map_or(&[][..], Split::marks);
+        overview::build(self.diff.patch(), marks, &self.symbols)
     }
 
     /// Whether hunks are being chosen right now: a split is under way, it

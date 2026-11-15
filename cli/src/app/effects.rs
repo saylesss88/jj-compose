@@ -7,7 +7,7 @@ use std::{
     process,
 };
 
-use jj_compose_core::{Draft, Field, Jj, Split};
+use jj_compose_core::{Draft, Field, Jj, Split, symbols};
 use ratatui::{
     DefaultTerminal,
     crossterm::{
@@ -29,6 +29,12 @@ impl App {
         request: &Request,
     ) -> io::Result<()> {
         match request {
+            // One `jj file show` per file, so it is done once per diff and
+            // only when the overview is actually wanted.
+            Request::Symbols => {
+                self.symbols =
+                    symbols::for_patch(jj, &self.target, self.diff.patch()).unwrap_or_default();
+            }
             Request::Split { message } => {
                 if let Err(e) = self.run_split(jj, message) {
                     self.status = Some(Status::Error(e));
@@ -118,6 +124,9 @@ impl App {
         self.target = jj.resolve(&remainder).map_err(|e| e.to_string())?;
         self.change_id = self.target.change_id.clone();
         self.diff = diff::load(jj, &self.target).map_err(|e| e.to_string())?;
+        // A new diff means the old symbols describe the wrong lines.
+        self.symbols.clear();
+        self.overview = None;
 
         let description = jj.description(&self.target).map_err(|e| e.to_string())?;
         let original = description.trim_end().to_owned();

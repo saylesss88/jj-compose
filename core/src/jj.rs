@@ -288,6 +288,20 @@ impl Jj {
             .collect()
     }
 
+    /// The lines of one file as it is in `target`.
+    ///
+    /// # Errors
+    ///
+    /// If the path isn't in that revision, or `jj` fails.
+    pub fn file_lines(&self, target: &Target, path: &str) -> Result<Vec<String>> {
+        let fileset = format!("root-file:{path:?}");
+        let stdout = self.output(&["file", "show", "-r", &target.commit_id, &fileset])?;
+        Ok(String::from_utf8(stdout)?
+            .lines()
+            .map(str::to_owned)
+            .collect())
+    }
+
     /// Set the description of `target`.
     ///
     /// The message goes over stdin rather than `-m`, so a message starting
