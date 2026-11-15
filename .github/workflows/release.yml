@@ -51,4 +51,4 @@ jobs:
       - name: Upload
         uses: softprops/action-gh-release@v2
         with:
-          files: jj-release-${{ matrix.target }}.tar.gz
+          files: jj-compose-${{ matrix.target }}.tar.gz
