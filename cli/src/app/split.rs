@@ -6,54 +6,107 @@ use crate::{
 impl App {
     /// Walking the list: the cursor skips file headings, and moving it moves
     /// the hunk on screen, so marking always acts on what you are looking at.
-    fn overview_key(&mut self, code: KeyCode) -> Option<Exit> {
+    ///
+    /// `v` or `V` starts a visual selection at the cursor; moving then
+    /// stretches it, and a digit puts every hunk in it in that commit at
+    /// once (`V G 1`, `V ] 2`). The selection is a run of hunks in diff
+    /// order, so unlike `a` it can span files.
+    fn overview_key(&mut self, code: KeyCode, ctrl: bool) -> Option<Exit> {
         let rows = self.overview_rows();
         let at = self.overview?;
-        let step = |from: usize, down: bool| {
-            let mut i = from;
-            loop {
-                let next = if down { i + 1 } else { i.checked_sub(1)? };
-                if next >= rows.len() {
-                    return None;
-                }
-                i = next;
-                if rows[i].hunk.is_some() {
-                    return Some(i);
-                }
-            }
-        };
+        // Only hunk rows can hold the cursor; work in hunk numbers, which
+        // are also the split's, and map back to rows at the end.
+        let hunk_rows: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.hunk.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        let here = hunk_rows.iter().position(|&r| r == at)?;
+        let last = hunk_rows.len().saturating_sub(1);
+        let files: Vec<usize> = hunk_rows
+            .iter()
+            .filter_map(|&r| rows[r].hunk.map(|h| h.file))
+            .collect();
+        let half = self.diff.half_page();
+        let mut to = here;
+
         match code {
+            // Motions, which also stretch a selection.
+            KeyCode::Char('d') if ctrl => to = (here + half).min(last),
+            KeyCode::Char('u') if ctrl => to = here.saturating_sub(half),
+            KeyCode::Char('j') | KeyCode::Down => to = (here + 1).min(last),
+            KeyCode::Char('k') | KeyCode::Up => to = here.saturating_sub(1),
+            KeyCode::Char('g') | KeyCode::Home => to = 0,
+            KeyCode::Char('G') | KeyCode::End => to = last,
+            KeyCode::Char(']') => to = file_jump(&files, here, true),
+            KeyCode::Char('[') => to = file_jump(&files, here, false),
+
+            // Selecting.
+            KeyCode::Char('v' | 'V') => {
+                self.visual = if self.visual.is_some() {
+                    None
+                } else {
+                    Some(here)
+                };
+            }
+            // Vim's `o`: jump to the other end of the selection.
+            KeyCode::Char('o') if self.visual.is_some() => {
+                to = self.visual.replace(here).unwrap_or(here);
+            }
+            KeyCode::Esc if self.visual.is_some() => self.visual = None,
+
             // `Enter` goes back to reading the hunk under the cursor; the
             // others just close the list. Same effect, since the cursor has
             // been moving the hunk on screen all along.
-            KeyCode::Char('f' | 'q') | KeyCode::Esc | KeyCode::Enter => self.overview = None,
-            KeyCode::Char('j') | KeyCode::Down => {
-                if let Some(i) = step(at, true) {
-                    self.overview = Some(i);
+            KeyCode::Char('f' | 'q') | KeyCode::Esc | KeyCode::Enter => {
+                self.overview = None;
+                self.visual = None;
+            }
+
+            // Assigning works exactly as it does on the hunk itself, or on
+            // the whole selection when there is one. Either way a selection
+            // ends once it has been used, as in Vim.
+            KeyCode::Char(c @ ('1'..='9' | ' ')) => {
+                let commit = if c == ' ' { 1 } else { digit(c) };
+                let split = self.split.as_mut()?;
+                match self.visual.take() {
+                    Some(from) => split.toggle_range(from, here, commit),
+                    None => split.toggle(commit),
                 }
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if let Some(i) = step(at, false) {
-                    self.overview = Some(i);
+            KeyCode::Char('0') => {
+                let split = self.split.as_mut()?;
+                match self.visual.take() {
+                    Some(from) => split.assign_range(from, here, None),
+                    None => split.assign(None),
                 }
             }
-            KeyCode::Char('g') => self.overview = rows.iter().position(|r| r.hunk.is_some()),
-            KeyCode::Char('G') => self.overview = rows.iter().rposition(|r| r.hunk.is_some()),
-            // Marking works exactly as it does on the hunk itself.
-            // Assigning works exactly as it does on the hunk itself.
-            KeyCode::Char(c @ '1'..='9') => self.split.as_mut()?.toggle(digit(c)),
-            KeyCode::Char(' ') => self.split.as_mut()?.toggle(1),
-            KeyCode::Char('0') => self.split.as_mut()?.assign(None),
+            // `d`/`x` on a selection take it out, as Vim's would delete it.
+            KeyCode::Char('d' | 'x') if self.visual.is_some() => {
+                let from = self.visual.take()?;
+                self.split.as_mut()?.assign_range(from, here, None);
+            }
             KeyCode::Char('a') => {
+                self.visual = None;
                 let commit = self.split.as_ref()?.box_of().unwrap_or(1);
                 self.split.as_mut()?.assign_file(Some(commit));
             }
             KeyCode::Char('d') => self.split.as_mut()?.assign_file(None),
-            KeyCode::Char('A') => self.split.as_mut()?.assign_all(Some(1)),
-            KeyCode::Char('C') => self.split.as_mut()?.assign_all(None),
+            KeyCode::Char('A') => {
+                self.visual = None;
+                self.split.as_mut()?.assign_all(Some(1));
+            }
+            KeyCode::Char('C') => {
+                self.visual = None;
+                self.split.as_mut()?.assign_all(None);
+            }
             _ => return None,
         }
         // Keep the hunk on screen in step with the row under the cursor.
+        if self.overview.is_some() {
+            self.overview = hunk_rows.get(to).copied();
+        }
         if let (Some(at), Some(split)) = (self.overview, self.split.as_mut()) {
             if let Some(id) = rows.get(at).and_then(|r| r.hunk) {
                 split.go_to(id);
@@ -64,25 +117,41 @@ impl App {
         None
     }
 
+    /// Open the list with the cursor on the hunk on screen, optionally
+    /// starting a visual selection there.
+    fn open_overview(&mut self, select: bool) {
+        let rows = self.overview_rows();
+        let at = self.split.as_ref().map_or(0, Split::at);
+        self.overview = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.hunk.is_some())
+            .nth(at)
+            .map(|(i, _)| i);
+        self.visual = (select && self.overview.is_some()).then_some(at);
+        // The symbols cost a subprocess each, so only now are they wanted.
+        if self.symbols.is_empty() {
+            self.pending = Some(app::Request::Symbols);
+        }
+    }
+
     /// Deciding one hunk at a time: add it, skip it, or move around.
     pub(super) fn split_key(&mut self, code: KeyCode, ctrl: bool) -> Option<Exit> {
         if self.overview.is_some() {
-            return self.overview_key(code);
+            return self.overview_key(code, ctrl);
         }
-        // Opening the list needs the symbols, which cost a subprocess each.
-        if code == KeyCode::Char('f') {
-            let rows = self.overview_rows();
-            let at = self.split.as_ref().map_or(0, Split::at);
-            self.overview = rows
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| r.hunk.is_some())
-                .nth(at)
-                .map(|(i, _)| i);
-            if self.symbols.is_empty() {
-                self.pending = Some(app::Request::Symbols);
+        match code {
+            KeyCode::Char('f') => {
+                self.open_overview(false);
+                return None;
             }
-            return None;
+            // Selecting happens in the list, so `V` opens it already
+            // selecting from the hunk on screen.
+            KeyCode::Char('v' | 'V') => {
+                self.open_overview(true);
+                return None;
+            }
+            _ => {}
         }
         // Scrolling, for a hunk taller than the pane.
         match code {
@@ -205,7 +274,55 @@ impl App {
     }
 }
 
+/// Where `]` (forward) or `[` lands from hunk `here`, given each hunk's
+/// file: the next file's first hunk, or this file's first hunk (the
+/// previous file's, if already there). Past either end it stops on the
+/// first or last hunk, so `V ]` on the last file selects to the end.
+fn file_jump(files: &[usize], here: usize, forward: bool) -> usize {
+    let last = files.len().saturating_sub(1);
+    let start_of = |k: usize| {
+        (0..=k)
+            .rev()
+            .take_while(|&i| files[i] == files[k])
+            .last()
+            .unwrap_or(k)
+    };
+    if forward {
+        (here..=last)
+            .find(|&k| files[k] != files[here])
+            .unwrap_or(last)
+    } else {
+        let first = start_of(here);
+        if first < here {
+            first
+        } else {
+            first.checked_sub(1).map_or(0, start_of)
+        }
+    }
+}
+
 /// A digit key as the commit number it names.
 fn digit(c: char) -> u8 {
     u8::try_from(c.to_digit(10).unwrap_or(1)).unwrap_or(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_jump;
+
+    #[test]
+    fn file_jumps_land_on_file_boundaries() {
+        // Hunks 0-2 in file 0, 3-4 in file 1, 5 in file 2.
+        let files = [0, 0, 0, 1, 1, 2];
+        assert_eq!(file_jump(&files, 1, true), 3);
+        assert_eq!(file_jump(&files, 3, true), 5);
+        assert_eq!(
+            file_jump(&files, 5, true),
+            5,
+            "the last file stops at its end"
+        );
+        assert_eq!(file_jump(&files, 4, false), 3, "this file's start");
+        assert_eq!(file_jump(&files, 3, false), 0, "then the previous file's");
+        assert_eq!(file_jump(&files, 0, false), 0);
+    }
 }

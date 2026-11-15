@@ -147,6 +147,7 @@ impl App {
         // A new diff means the old symbols describe the wrong lines.
         self.symbols.clear();
         self.overview = None;
+        self.visual = None;
 
         let description = jj.description(&self.target).map_err(|e| e.to_string())?;
         let original = description.trim_end().to_owned();

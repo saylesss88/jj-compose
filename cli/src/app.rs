@@ -131,6 +131,10 @@ pub struct App {
     /// The whole change as a list, with the row the cursor is on. `None`
     /// while reading hunks one at a time.
     pub(super) overview: Option<usize>,
+    /// Where a visual selection in the overview started, as a hunk index
+    /// (see [`Split::at`]). The selection runs from here to the cursor.
+    /// `None` when not selecting, and always `None` with the list closed.
+    pub(super) visual: Option<usize>,
     /// The definition each hunk sits in, parallel to the diff's hunks.
     /// Empty until [`Request::Symbols`] has been carried out.
     pub(super) symbols: Vec<Option<String>>,
@@ -188,6 +192,7 @@ impl App {
             target,
             split: None,
             overview: None,
+            visual: None,
             symbols: Vec::new(),
             plan: Plan::default(),
             at_risk: session.at_risk,
@@ -867,6 +872,117 @@ index 3333333..4444444 100644
         let mut app = app("", Keymap::Default);
         app.diff = DiffView::from_output(THREE_HUNKS, "").unwrap();
         app
+    }
+
+    /// Split mode with the hunk list open, as after `Alt-s f`.
+    fn listing_app() -> App {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('f'));
+        assert!(app.overview.is_some());
+        app
+    }
+
+    fn plan(app: &App) -> Vec<Option<u8>> {
+        app.split.as_ref().unwrap().plan().to_vec()
+    }
+
+    /// `V G 1`: one digit puts a whole run of hunks in a commit, across
+    /// files, and the selection ends once used.
+    #[test]
+    fn a_visual_selection_is_assigned_with_one_digit() {
+        let mut app = listing_app();
+        press(&mut app, KeyCode::Char('V'));
+        press(&mut app, KeyCode::Char('G'));
+        assert_eq!(app.split.as_ref().unwrap().at(), 2, "the hunk follows");
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!(plan(&app), [Some(1); 3]);
+        assert!(app.visual.is_none(), "assigning ends the selection");
+        assert!(app.overview.is_some(), "but the list stays open");
+
+        // Without a selection, a digit is back to meaning one hunk.
+        press(&mut app, KeyCode::Char('2'));
+        assert_eq!(plan(&app), [Some(1), Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn the_same_digit_on_a_full_selection_takes_it_back_out() {
+        let mut app = listing_app();
+        for key in ['v', 'j', '3', 'v', 'k', '3'] {
+            press(&mut app, KeyCode::Char(key));
+        }
+        assert_eq!(plan(&app), [None, None, None]);
+    }
+
+    /// Selecting upwards works the same, and `0`/`d` clear a selection.
+    #[test]
+    fn a_selection_runs_either_way_and_can_be_cleared() {
+        let mut app = listing_app();
+        press(&mut app, KeyCode::Char('A'));
+        press(&mut app, KeyCode::Char('G'));
+        press(&mut app, KeyCode::Char('V'));
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('0'));
+        assert_eq!(plan(&app), [Some(1), None, None]);
+
+        press(&mut app, KeyCode::Char('A'));
+        press(&mut app, KeyCode::Char('V'));
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(
+            plan(&app),
+            [None, None, Some(1)],
+            "d took the selection only"
+        );
+    }
+
+    #[test]
+    fn esc_drops_the_selection_before_closing_the_list() {
+        let mut app = listing_app();
+        press(&mut app, KeyCode::Char('V'));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.visual.is_none());
+        assert!(
+            app.overview.is_some(),
+            "the first Esc only cancels selecting"
+        );
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!(plan(&app), [Some(1), None, None], "back to one hunk");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.overview.is_none());
+    }
+
+    /// `]`/`[` move by file in the list, so `V ]` reaches the next file and
+    /// `o` swaps ends to stretch the other way.
+    #[test]
+    fn file_motions_and_o_shape_the_selection() {
+        let mut app = listing_app();
+        press(&mut app, KeyCode::Char(']'));
+        assert_eq!(app.split.as_ref().unwrap().at(), 2, "b.rs's first hunk");
+        press(&mut app, KeyCode::Char('['));
+        assert_eq!(app.split.as_ref().unwrap().at(), 0, "a.rs's first hunk");
+
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('V'));
+        press(&mut app, KeyCode::Char(']'));
+        press(&mut app, KeyCode::Char('o'));
+        assert_eq!(app.split.as_ref().unwrap().at(), 1, "back at the anchor");
+        press(&mut app, KeyCode::Char('2'));
+        assert_eq!(plan(&app), [None, Some(2), Some(2)]);
+    }
+
+    /// From a single hunk, `V` opens the list already selecting from it.
+    #[test]
+    fn v_in_the_hunk_view_opens_the_list_selecting() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('n'));
+        press(&mut app, KeyCode::Char('V'));
+        assert!(app.overview.is_some());
+        assert_eq!(app.visual, Some(1));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('4'));
+        assert_eq!(plan(&app), [None, Some(4), Some(4)]);
     }
 
     #[test]

@@ -161,6 +161,28 @@ impl Split {
         }
     }
 
+    /// Assign every hunk between `from` and `to`, inclusive and in either
+    /// order, as a visual selection in the overview does. Out-of-range ends
+    /// are clamped to the last hunk.
+    pub fn assign_range(&mut self, from: usize, to: usize, commit: Option<u8>) {
+        let last = self.ids.len().saturating_sub(1);
+        let (lo, hi) = (from.min(to).min(last), from.max(to).min(last));
+        for i in lo..=hi {
+            self.set(i, commit);
+        }
+    }
+
+    /// [`Self::toggle`] for a range: if every hunk in it is already in
+    /// `commit` they all come out, otherwise they all go in. A selection
+    /// that is half in box 1 is made whole rather than flipped hunk by hunk,
+    /// so pressing the digit twice always ends where it started.
+    pub fn toggle_range(&mut self, from: usize, to: usize, commit: u8) {
+        let last = self.ids.len().saturating_sub(1);
+        let (lo, hi) = (from.min(to).min(last), from.max(to).min(last));
+        let all_in = self.boxes[lo..=hi].iter().all(|b| *b == Some(commit));
+        self.assign_range(lo, hi, (!all_in).then_some(commit));
+    }
+
     pub fn assign_all(&mut self, commit: Option<u8>) {
         for i in 0..self.boxes.len() {
             self.set(i, commit);
@@ -339,6 +361,32 @@ mod tests {
         assert_eq!(s.at(), 0, "assigning does not move");
         s.assign_file(None);
         assert_eq!(s.assigned(), 0);
+    }
+
+    #[test]
+    fn a_range_is_assigned_in_either_direction_and_clamped() {
+        let mut s = split();
+        s.assign_range(2, 1, Some(4));
+        assert_eq!(s.plan(), [None, Some(4), Some(4)]);
+        assert_eq!(s.planned(), 4);
+        s.assign_range(0, 99, None);
+        assert_eq!(s.assigned(), 0, "an end past the last hunk is clamped");
+        assert_eq!(s.at(), 0, "assigning a range does not move");
+    }
+
+    /// A range spans files: that is what it adds over `assign_file`.
+    #[test]
+    fn toggling_a_range_fills_it_then_empties_it() {
+        let mut s = split();
+        s.assign(Some(1)); // hunk 0 already in box 1
+        s.toggle_range(0, 2, 1);
+        assert_eq!(s.plan(), [Some(1); 3], "a partly filled range is completed");
+        s.toggle_range(0, 2, 1);
+        assert_eq!(s.assigned(), 0, "a full range is emptied");
+
+        s.assign(Some(2));
+        s.toggle_range(0, 1, 1);
+        assert_eq!(s.plan(), [Some(1), Some(1), None], "moved out of box 2");
     }
 
     #[test]

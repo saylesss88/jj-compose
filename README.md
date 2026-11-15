@@ -335,6 +335,7 @@ them or take it out again right up to the split:
 | `g` / `G`                       | First / last hunk                                          |
 | `a` / `d`                       | Put the rest of this file in the same commit / take it out |
 | `f`                             | Show the whole change as a list                            |
+| `V` / `v`                       | Open the list, selecting from this hunk (see below)        |
 | `Enter`                         | Done planning; go write the messages                       |
 | `Esc`, `q`                      | Leave split mode, discarding the plan                      |
 | `j` / `k`, `Ctrl-d` / `Ctrl-u`  | Scroll inside a hunk taller than the pane                  |
@@ -377,6 +378,33 @@ size, and the definition it sits in.
 The cursor in the list and the hunk on screen are the same cursor, so `j`/`k`
 move both and every assigning key works the same in either view. `Enter`, `f` or
 `Esc` goes back to reading whichever hunk the cursor was left on.
+
+### Selecting a run of hunks
+
+Pressing a digit twenty times for twenty hunks is tedious, so the list has
+Vim's visual line mode. `V` (or `v`) starts a selection at the cursor, moving
+stretches it, and one digit puts every hunk in it in that commit:
+
+| Key                            | Action                                                  |
+| ------------------------------ | ------------------------------------------------------- |
+| `V` / `v`                      | Start or cancel a selection                             |
+| `j` / `k`, `Ctrl-d` / `Ctrl-u` | Stretch it a hunk / half a page                         |
+| `]` / `[`                      | Stretch it to the next file / back to a file's start    |
+| `g` / `G`                      | Stretch it to the first / last hunk                     |
+| `o`                            | Jump to the other end of the selection                  |
+| `1`–`9`                        | Put the whole selection in that commit                  |
+| `0`, `d`, `x`                  | Take the whole selection back out                       |
+| `Esc`                          | Cancel the selection; a second `Esc` closes the list    |
+
+`V G 1` puts everything from the cursor down in commit 1. Unlike `a`, a
+selection is a run in diff order, so it can span files. The digit acts like it
+does on one hunk: if the whole selection is already in that commit it comes
+back out, otherwise all of it goes in. Using the selection ends it, as in Vim.
+
+There are no counts (`20j`), because the digits already name commits: `2`
+could not mean both "commit 2" and "the start of a count" without making
+every assignment wait to see what comes next. `]`, `G` and `Ctrl-d` cover the
+same ground without guessing.
 
 The enclosing definition is worked out from the file rather than read out of the
 diff, because `jj diff --git` omits it where `git diff` includes it. It uses

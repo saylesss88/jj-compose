@@ -81,7 +81,7 @@ impl App {
         let rows = self.overview_rows();
         let assigned = self.split.as_ref().map_or(0, Split::assigned);
         let hunks = rows.iter().filter(|r| r.hunk.is_some()).count();
-        let boxes = self.split.as_ref().map_or_default(Split::pending);
+        let boxes = self.split.as_ref().map_or_else(Vec::new, Split::pending);
         let title = Line::from(vec![
             Span::raw(format!(" Hunks in {} ", self.change_id)),
             immutable_marker(self.target.immutable),
@@ -103,6 +103,27 @@ impl App {
                 Color::Cyan,
             ),
         ]);
+        // The selection, as hunk numbers, and each row's hunk number.
+        let selected = self.visual.map(|from| {
+            let to = self.split.as_ref().map_or(from, Split::at);
+            from.min(to)..=from.max(to)
+        });
+        let mut title = title;
+        if let Some(range) = &selected {
+            let n = range.end() - range.start() + 1;
+            title.spans.push(Span::styled(
+                format!("· VISUAL {n} selected "),
+                Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ));
+        }
+        let mut hunk_of = Vec::with_capacity(rows.len());
+        let mut next = 0;
+        for row in &rows {
+            hunk_of.push(row.hunk.map(|_| {
+                next += 1;
+                next - 1
+            }));
+        }
         let block = pane(title, Some(accent));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -116,7 +137,13 @@ impl App {
             .enumerate()
             .skip(top)
             .take(height)
-            .map(|(i, row)| overview_line(row, i == cursor))
+            .map(|(i, row)| {
+                let in_selection = selected
+                    .as_ref()
+                    .zip(hunk_of[i])
+                    .is_some_and(|(range, k)| range.contains(&k));
+                overview_line(row, i == cursor, in_selection)
+            })
             .collect();
         frame.render_widget(Paragraph::new(lines), inner);
         frame.render_widget(self.status_line(), status);
@@ -223,14 +250,17 @@ impl App {
             }
             None => {}
         }
-        if self.overview.is_some() && self.choosing() {
+        if self.overview.is_some() && self.choosing() && self.visual.is_some() {
             let keys =
-                " 1-9 commit · 0 none · j/k row · a/d file · Enter read it · f close · Esc leave";
+                " 1-9 commit selection · 0/d none · j/k ]/[ g/G extend · o other end · Esc cancel";
+            return Line::from(vec![Span::raw(keys).magenta()]);
+        }
+        if self.overview.is_some() && self.choosing() {
+            let keys = " 1-9 commit · 0 none · j/k row · V select · a/d file · Enter read it · f close · Esc leave";
             return Line::from(vec![Span::raw(keys).dark_gray()]);
         }
         if self.choosing() {
-            let keys =
-                " 1-9 commit · 0 none · n/p hunk · a/d file · f list · Enter message · Esc leave";
+            let keys = " 1-9 commit · 0 none · n/p hunk · a/d file · f list · V select · Enter message · Esc leave";
             return Line::from(vec![Span::raw(keys).dark_gray()]);
         }
         let keys = match (self.focus, self.keymap, self.vim.mode) {
@@ -339,7 +369,7 @@ fn header_counter(len: usize) -> Span<'static> {
 
 /// `n` with `word` pluralised the easy way.
 /// One row of the overview: a file heading, or a hunk marked or not.
-fn overview_line(row: &overview::Row, cursor: bool) -> Line<'static> {
+fn overview_line(row: &overview::Row, cursor: bool, selected: bool) -> Line<'static> {
     let color = match row.kind {
         overview::Kind::File => Color::Cyan,
         overview::Kind::InBox(_) => Color::Green,
@@ -351,8 +381,12 @@ fn overview_line(row: &overview::Row, cursor: bool) -> Line<'static> {
     }
     if cursor {
         style = style.add_modifier(Modifier::REVERSED);
+    } else if selected {
+        style = style.bg(Color::DarkGray);
     }
-    Line::styled(format!(" {}", row.text), style)
+    // A bar in the gutter, so the selection reads even without colors.
+    let gutter = if selected { '▌' } else { ' ' };
+    Line::styled(format!("{gutter}{}", row.text), style)
 }
 
 /// A standing reminder that this session is rewriting protected history, so
