@@ -1130,4 +1130,50 @@ index 3333333..4444444 100644
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert!(!app.zoomed);
     }
+
+    #[test]
+    fn integration_multi_split_kanban_workflow() {
+        let mut app = splitting_app(); // 3 hunks available
+
+        // 1. Enter split mode from the diff pane
+        app.focus_diff();
+        press(&mut app, KeyCode::Char('s'));
+        assert!(app.choosing());
+
+        // 2. Assign hunks to the Kanban board (Hunk 0 -> Box 1, Hunk 1 -> Box 2)
+        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('n'));
+        press(&mut app, KeyCode::Char('2'));
+
+        let split = app.split.as_ref().unwrap();
+        assert_eq!(split.plan(), [Some(1), Some(2), None]);
+        assert_eq!(split.next_box(), Some(1), "Box 1 should be queued first");
+
+        // 3. Confirm assignments and transition to the editor
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.focus, Focus::Editor);
+        assert!(!app.choosing(), "Should leave hunk selection mode");
+
+        // 4. Draft the conventional commit for Box 1
+        type_str(&mut app, "feat");
+        press(&mut app, KeyCode::Tab); // Skip Scope
+        press(&mut app, KeyCode::Tab); // Enter Subject
+        type_str(&mut app, "first split");
+
+        // 5. Submit the form (Ctrl-s)
+        assert!(
+            ctrl(&mut app, 's').is_none(),
+            "App must stay open because more boxes remain"
+        );
+
+        // 6. Verify the exact side-effect request handed to the event loop
+        let Some(Request::Split { message }) = app.pending.take() else {
+            panic!("Expected a Split request to be emitted!");
+        };
+
+        assert!(
+            message.starts_with("feat: first split"),
+            "Emitted message was: {message}"
+        );
+    }
 }
