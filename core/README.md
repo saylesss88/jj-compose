@@ -10,20 +10,23 @@ consumer, but nothing here assumes one.
 
 ## Requirements
 
-The `jj` binary must be on `PATH`. Everything in [`jj`] shells out to it rather
+The `jj` binary must be on `PATH`. Everything in `jj` shells out to it rather
 than linking against `jj-lib`, so this crate stays small and tracks whatever
 `jj` the user already has.
 
 ## What's in it
 
-| Module    | What it does                                                                                          |
-| --------- | ----------------------------------------------------------------------------------------------------- |
-| `jj`      | Run `jj` commands against one resolved revision: read its description and diff, describe it, split it |
-| `message` | Parse and render `type(scope): subject` messages with `Problem:`/`Solution:` sections and trailers    |
-| `patch`   | Parse a git-format diff into files and hunks, and build a patch of a chosen subset                    |
-| `marks`   | Track which hunks the user picked, independently of where they are in the diff                        |
-| `split`   | Write a chosen subset into the two trees `jj split -i` hands a diff editor                            |
-| `error`   | One `Error` enum, and a `Result` alias                                                                |
+| Module     | What it does                                                                                          |
+| ---------- | ----------------------------------------------------------------------------------------------------- |
+| `jj`       | Run `jj` commands against one resolved revision: read its description and diff, describe it, split it |
+| `message`  | Parse and render `type(scope): subject` messages with `Problem:`/`Solution:` sections and trailers    |
+| `patch`    | Parse a git-format diff into files and hunks, and build a patch of a chosen subset                    |
+| `marks`    | Track which hunks the user picked, independently of where they are in the diff                        |
+| `plan`     | Carry the remaining boxes across a split, keyed by hunk content                                       |
+| `split`    | Write a chosen subset into the two trees `jj split -i` hands a diff editor                            |
+| `overview` | Lay out every hunk in a change as aligned rows, with its box and enclosing definition                 |
+| `symbols`  | Find the function or type each hunk sits inside, which `jj diff --git` leaves out                     |
+| `error`    | One `Error` enum, and a `Result` alias                                                                |
 
 ## Describing a change
 
@@ -105,9 +108,34 @@ the user's own diff colors; the escape codes have to come off before parsing.
 
 Splitting a change into more than two commits means committing one box, then
 re-finding the rest: a `HunkId` only means anything within one diff, and
-committing part of a change shifts every later hunk's line numbers. Use [`Plan`]
-to carry the remaining boxes across — it keys them by each hunk's text, which a
-split leaves untouched.
+committing part of a change shifts every later hunk's line numbers. Use `Plan`
+to carry the remaining boxes across, it keys them by each hunk's text, which a
+split leaves untouched:
+
+```rust
+use jj_compose_core::{Patch, Plan, Split};
+
+/// `before` and `split` describe the change as it was planned; `after` is
+/// the remainder's diff once the lowest box has been committed, and `fresh`
+/// a `Split` built from it.
+fn carry_over(before: &Patch, split: &Split, after: &Patch, fresh: &mut Split) {
+    let plan = Plan::capture(before, split);
+    plan.apply(after, fresh);
+    // Box numbers are kept, not renumbered: commit `fresh.pending()` lowest
+    // first, as before. Hunks that aren't found were the ones just committed.
+}
+```
+
+Capture the plan _before_ committing, since afterwards the old diff is gone.
+
+## Seeing the whole change
+
+`overview::build` lays out every hunk at once: a heading per file, then a row
+per hunk with its box, size, and the definition it sits in. With the column
+alignment done here so it can be tested without a terminal. The caller only
+picks colors. The definitions come from `symbols::for_patch`, which reads each
+file back through `jj` because `jj diff --git` doesn't put them in the hunk
+headers the way `git diff` does.
 
 ## Splitting
 
