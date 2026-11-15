@@ -2,7 +2,7 @@
 name = "jj_compose_core"
 version.workspace = true
 edition.workspace = true
-description = "Core library for jj-compose"
+description = "Core library behind jj-compose: a jj wrapper, a Conventional Commit message model, and hunk splitting"
 documentation = "https://docs.rs/jj_compose_core/latest/jj_compose_core/"
 license.workspace = true
 authors.workspace = true

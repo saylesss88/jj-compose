@@ -23,7 +23,7 @@
 
 use thiserror::Error;
 
-/// Header length (`type(scope): subject`) most style guides aim for.
+/// Header length (`type(scope): subject`).
 pub const HEADER_SOFT_LIMIT: usize = 50;
 /// Header length past which forges and `git log --oneline` start truncating.
 pub const HEADER_HARD_LIMIT: usize = 72;

@@ -4,6 +4,11 @@
 //! See [`message`] for the message format and how existing descriptions are
 //! parsed without being rewritten, [`patch`] and [`marks`] for choosing part
 //! of a change, and [`split`] for writing that choice back out.
+/// Compiles the examples in `README.md` as doctests, so they can't drift
+/// from the API. Not part of the public surface.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct Readme;
 
 pub mod error;
 pub mod jj;
