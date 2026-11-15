@@ -9,6 +9,7 @@ documentation.workspace = true
 description.workspace = true
 keywords.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 jj_compose_core = { path = "../core", version = "0.1.0" }
