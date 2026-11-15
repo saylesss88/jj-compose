@@ -26,3 +26,10 @@ path = "fuzz_targets/fuzz_message.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_patch"
+path = "fuzz_targets/fuzz_patch.rs"
+test = false
+doc = false
+bench = false

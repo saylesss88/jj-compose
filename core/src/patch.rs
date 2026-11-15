@@ -51,8 +51,13 @@ fn side_range(header: &str, sign: char) -> Range<usize> {
     let count: usize = count.parse().unwrap_or(1);
     // Line numbers are 1-based, except that a count of zero points at the
     // gap *before* the given line rather than at a line.
-    let start = if count == 0 { start } else { start - 1 };
-    start..start + count
+    let start = if count == 0 {
+        start
+    } else {
+        start.saturating_sub(1)
+    };
+
+    start..start.saturating_add(count)
 }
 
 /// Split `lines` (one diff, without colors) into files and hunks.
@@ -250,5 +255,25 @@ impl Patch {
         }
         out.extend_from_slice(&before[pos.min(before.len())..]);
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fuzz_crash_c0cd0140() {
+        // The exact byte sequence that panicked the fuzzer
+        let data = [
+            10, 11, 10, 10, 100, 105, 102, 102, 32, 45, 45, 103, 105, 116, 32, 10, 10, 64, 64, 61,
+            61, 100, 32, 60, 0, 103, 105, 116, 32, 10, 10, 64, 64, 61, 61, 100, 105, 102, 51, 32,
+            45, 48, 10, 10, 10, 10, 100, 105, 102, 102, 32, 45, 45, 103, 105, 116, 32, 10, 10, 64,
+            64, 0, 0, 0, 0, 0, 0, 0, 10, 64, 64, 0, 103, 105,
+        ];
+        let diff_text = std::str::from_utf8(&data).unwrap();
+
+        // This will trigger the standard Rust panic with a clear line number
+        let _ = Patch::from_text(diff_text);
     }
 }
