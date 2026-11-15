@@ -193,6 +193,15 @@ binary. Hunks are also the smallest unit here: there's no splitting a hunk by
 line, and a binary file has no hunks, so its change can't be separated from the
 rest.
 
+## Examples
+
+See the [`examples/`](examples/) directory for runnable demos:
+
+- `overview`: Print the board for a revision: every hunk, the file it's in and
+  the definition it sits inside.
+
+- `split_first`: Split the first hunk of a revision off into its own commit.
+
 ## License
 
 [Apache-2.0](https://github.com/saylesss88/jj-compose/blob/main/LICENSE)
