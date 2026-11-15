@@ -16,6 +16,7 @@ pub mod marks;
 pub mod message;
 pub mod overview;
 pub mod patch;
+pub mod plan;
 pub mod split;
 pub mod symbols;
 
@@ -24,3 +25,4 @@ pub use jj::{Jj, TaggedCommit, Target};
 pub use marks::Split;
 pub use message::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT, ParseError};
 pub use patch::{FileDiff, Hunk, HunkId, Patch};
+pub use plan::Plan;

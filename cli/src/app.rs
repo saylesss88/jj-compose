@@ -19,7 +19,7 @@ use crate::{
     vim::{self, Dir, Vim},
 };
 
-use jj_compose_core::{Draft, Field, Jj, Split, TaggedCommit, Target, overview};
+use jj_compose_core::{Draft, Field, Jj, Plan, Split, TaggedCommit, Target, overview};
 
 /// Which key bindings the editor uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -93,7 +93,7 @@ pub enum Exit {
 pub enum Request {
     /// Show the diff outside the TUI: one file, or the whole change.
     OpenDiff { path: Option<String> },
-    /// Commit the hunks chosen in split mode, described by `message`.
+    /// Commit the next box of hunks, described by `message`.
     Split { message: String },
     /// Work out which definition each hunk sits in, for the overview.
     Symbols,
@@ -134,6 +134,9 @@ pub struct App {
     /// The definition each hunk sits in, parallel to the diff's hunks.
     /// Empty until [`Request::Symbols`] has been carried out.
     pub(super) symbols: Vec<Option<String>>,
+    /// Which commit each uncommitted hunk is destined for, in a form that
+    /// survives a split. Empty until a box is committed.
+    pub(super) plan: Plan,
     /// Tags that a rewrite would strand, and the commands to put them back.
     at_risk: Vec<TaggedCommit>,
     recovery: Vec<String>,
@@ -186,6 +189,7 @@ impl App {
             split: None,
             overview: None,
             symbols: Vec::new(),
+            plan: Plan::default(),
             at_risk: session.at_risk,
             recovery: Vec::new(),
             is_vertical: false,
@@ -235,8 +239,8 @@ impl App {
 
     /// The whole change as rows, for the overview.
     pub(super) fn overview_rows(&self) -> Vec<overview::Row> {
-        let marks = self.split.as_ref().map_or(&[][..], Split::marks);
-        overview::build(self.diff.patch(), marks, &self.symbols)
+        let plan = self.split.as_ref().map_or(&[][..], Split::plan);
+        overview::build(self.diff.patch(), plan, &self.symbols)
     }
 
     /// Whether hunks are being chosen right now: a split is under way, it
@@ -490,14 +494,14 @@ impl App {
             }
         };
         if let Some(split) = &self.split {
-            if split.count() == 0 {
+            if split.assigned() == 0 {
                 self.status = Some(Status::Error(
-                    "no hunks added: y adds the one on screen, Esc leaves split mode".into(),
+                    "nothing assigned: 1-9 puts the hunk on screen in a commit, Esc leaves".into(),
                 ));
                 return None;
             }
-            // Adding every hunk describes the change instead of splitting
-            // it, which is what jj would do anyway with nothing left over.
+            // One box holding everything leaves nothing behind, so it is a
+            // description, which is what jj would do anyway.
             if !split.is_everything() {
                 self.pending = Some(Request::Split { message });
                 return None;
@@ -942,9 +946,9 @@ index 3333333..4444444 100644
         assert!(!app.zoomed);
         assert!(!app.choosing());
         assert_eq!(
-            app.split.as_ref().unwrap().count(),
+            app.split.as_ref().unwrap().assigned(),
             1,
-            "the marks are still held"
+            "the plan is still held"
         );
     }
 
@@ -1011,16 +1015,60 @@ index 3333333..4444444 100644
     }
 
     #[test]
-    fn the_marked_hunks_make_a_patch_of_only_themselves() {
+    fn one_commits_hunks_make_a_patch_of_only_themselves() {
         let mut app = splitting_app();
         alt(&mut app, 's');
         press(&mut app, KeyCode::Char('n'));
-        press(&mut app, KeyCode::Char(' '));
-        let picked = app.split.as_ref().unwrap().picked();
+        press(&mut app, KeyCode::Char('1'));
+        let picked = app.split.as_ref().unwrap().picked(1);
         let text = app.diff.patch().subset(&picked);
         assert!(text.contains("+FIVE"), "{text}");
         assert!(!text.contains("+ONE"), "{text}");
         assert!(!text.contains("b.rs"), "{text}");
+    }
+
+    /// Hunks go into numbered commits, and the lowest is committed first.
+    #[test]
+    fn digits_put_hunks_in_different_commits() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('2'));
+        press(&mut app, KeyCode::Char('n'));
+        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('n'));
+        press(&mut app, KeyCode::Char('2'));
+        let split = app.split.as_ref().unwrap();
+        assert_eq!(split.plan(), [Some(2), Some(1), Some(2)]);
+        assert_eq!(split.next_box(), Some(1), "lowest box commits first");
+        assert_eq!(split.count(2), 2);
+        assert_eq!(split.planned(), 2);
+    }
+
+    /// The same digit again takes the hunk back out, so nothing is final.
+    #[test]
+    fn a_hunk_can_be_moved_between_commits_or_taken_out() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!(app.split.as_ref().unwrap().box_of(), Some(1));
+        press(&mut app, KeyCode::Char('3'));
+        assert_eq!(app.split.as_ref().unwrap().box_of(), Some(3));
+        press(&mut app, KeyCode::Char('3'));
+        assert_eq!(app.split.as_ref().unwrap().box_of(), None);
+        press(&mut app, KeyCode::Char('2'));
+        press(&mut app, KeyCode::Char('0'));
+        assert_eq!(app.split.as_ref().unwrap().assigned(), 0);
+    }
+
+    /// `a` puts the rest of the file in the same commit as the hunk on
+    /// screen, not always commit 1.
+    #[test]
+    fn a_follows_the_commit_the_hunk_is_already_in() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('3'));
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.split.as_ref().unwrap().plan(), [Some(3), Some(3), None]);
     }
 
     /// Rewriting protected history is flagged before any work is done, and

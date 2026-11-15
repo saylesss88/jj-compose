@@ -1,24 +1,32 @@
-//! Choosing which hunks of a change go into the next commit.
+//! Planning which hunks of a change go into which commit.
 //!
 //! Unlike `git add -p`, where each hunk is decided once as it goes past, the
-//! position and the marks here are independent: moving decides nothing, and
-//! a mark can be changed until the commit is made. Deciding a hunk well
-//! usually means having seen the others first.
+//! position and the plan here are independent: moving decides nothing, and a
+//! hunk can be moved between commits until the split is made. Deciding a
+//! hunk well usually means having seen the others first.
+//!
+//! Hunks are put in numbered boxes, one per commit to be made, and the boxes
+//! are committed lowest first — so the numbering is also the order the
+//! commits will end up in.
 
 use crate::HunkId;
 
-/// The hunks of a change, which one is being looked at, and which are marked
-/// to go in the commit being written.
+/// The hunks of a change, which one is being looked at, and which commit
+/// each is destined for.
 #[derive(Debug, Clone)]
 pub struct Split {
     /// Every hunk in the diff, in the order they appear.
     ids: Vec<HunkId>,
-    /// The file each hunk belongs to, for marking a whole file at once.
+    /// The file each hunk belongs to, for assigning a whole file at once.
     paths: Vec<String>,
     /// The hunk being looked at.
     at: usize,
-    /// Whether each hunk is marked, parallel to `ids`.
-    marked: Vec<bool>,
+    /// Which commit each hunk is destined for, parallel to `ids`. `None`
+    /// means it stays behind in what is left of the change.
+    boxes: Vec<Option<u8>>,
+    /// The highest box number ever used, so "commit 2 of 3" can still say
+    /// "of 3" once commit 1 has been made.
+    planned: u8,
 }
 
 impl Split {
@@ -29,10 +37,11 @@ impl Split {
     pub fn new(hunks: impl IntoIterator<Item = (HunkId, String)>) -> Option<Self> {
         let (ids, paths): (Vec<_>, Vec<_>) = hunks.into_iter().unzip();
         (ids.len() > 1).then(|| Self {
-            marked: vec![false; ids.len()],
+            boxes: vec![None; ids.len()],
             ids,
             paths,
             at: 0,
+            planned: 0,
         })
     }
 
@@ -49,14 +58,48 @@ impl Split {
     }
 
     /// The file the hunk being looked at belongs to.
+    #[must_use]
     pub fn path(&self) -> &str {
         self.paths.get(self.at).map_or("", String::as_str)
     }
 
-    /// Whether each hunk is marked, in the order the hunks appear.
+    /// The hunk being looked at, by id.
     #[must_use]
-    pub fn marks(&self) -> &[bool] {
-        &self.marked
+    pub fn current(&self) -> Option<HunkId> {
+        self.ids.get(self.at).copied()
+    }
+
+    /// Which commit each hunk is destined for, in the order they appear.
+    #[must_use]
+    pub fn plan(&self) -> &[Option<u8>] {
+        &self.boxes
+    }
+
+    /// The commit the hunk being looked at is destined for.
+    #[must_use]
+    pub fn box_of(&self) -> Option<u8> {
+        self.boxes.get(self.at).copied().flatten()
+    }
+
+    /// How many boxes were ever planned, which outlives committing them.
+    #[must_use]
+    pub const fn planned(&self) -> u8 {
+        self.planned
+    }
+
+    /// The boxes that still hold hunks, lowest first.
+    #[must_use]
+    pub fn pending(&self) -> Vec<u8> {
+        let mut used: Vec<u8> = self.boxes.iter().flatten().copied().collect();
+        used.sort_unstable();
+        used.dedup();
+        used
+    }
+
+    /// The box to commit next: the lowest one still holding hunks.
+    #[must_use]
+    pub fn next_box(&self) -> Option<u8> {
+        self.pending().first().copied()
     }
 
     /// Move without deciding anything, stopping at either end.
@@ -81,7 +124,7 @@ impl Split {
     /// Move to a particular hunk, if the change still has it.
     ///
     /// This is what lets an overview share one cursor with the hunk view:
-    /// moving in the list moves the hunk on screen, so marking always acts
+    /// moving in the list moves the hunk on screen, so assigning always acts
     /// on the thing you are looking at.
     pub fn go_to(&mut self, id: HunkId) {
         if let Some(i) = self.ids.iter().position(|&h| h == id) {
@@ -89,77 +132,114 @@ impl Split {
         }
     }
 
-    pub fn mark(&mut self, on: bool) {
-        if let Some(slot) = self.marked.get_mut(self.at) {
-            *slot = on;
-        }
+    /// Put the hunk being looked at in a box, or take it out with `None`.
+    pub fn assign(&mut self, commit: Option<u8>) {
+        self.set(self.at, commit);
     }
 
-    pub fn toggle(&mut self) {
-        self.mark(!self.is_marked());
+    /// Put it in `commit`, or take it out if it is already there, so the
+    /// same key both assigns and undoes.
+    pub fn toggle(&mut self, commit: u8) {
+        let next = if self.box_of() == Some(commit) {
+            None
+        } else {
+            Some(commit)
+        };
+        self.assign(next);
     }
 
-    /// Mark or unmark every hunk in the file being looked at, wherever in
-    /// the change those hunks sit.
-    pub fn mark_file(&mut self, on: bool) {
+    /// Assign every hunk in the file being looked at, wherever those hunks
+    /// sit in the change.
+    pub fn assign_file(&mut self, commit: Option<u8>) {
         let Some(path) = self.paths.get(self.at).cloned() else {
             return;
         };
         for i in 0..self.paths.len() {
             if self.paths[i] == path {
-                self.marked[i] = on;
+                self.set(i, commit);
             }
         }
     }
 
-    pub fn mark_all(&mut self, on: bool) {
-        self.marked.fill(on);
+    pub fn assign_all(&mut self, commit: Option<u8>) {
+        for i in 0..self.boxes.len() {
+            self.set(i, commit);
+        }
     }
 
-    #[must_use]
-    pub fn is_marked(&self) -> bool {
-        self.marked.get(self.at).copied().unwrap_or(false)
+    fn set(&mut self, i: usize, commit: Option<u8>) {
+        if let Some(slot) = self.boxes.get_mut(i) {
+            *slot = commit;
+        }
+        if let Some(n) = commit {
+            self.planned = self.planned.max(n);
+        }
     }
 
-    /// One character per hunk, so the shape of the whole change is visible
-    /// at a glance while only one hunk is on screen: `#` the hunk being
-    /// looked at and marked, `o` it and unmarked, `+` marked elsewhere, `·`
-    /// untouched.
+    /// Restore a box number worked out elsewhere, as when a plan is carried
+    /// across a split; see [`crate::plan::Plan`].
+    pub fn restore(&mut self, id: HunkId, commit: u8, planned: u8) {
+        if let Some(i) = self.ids.iter().position(|&h| h == id) {
+            self.boxes[i] = Some(commit);
+        }
+        self.planned = self.planned.max(planned);
+    }
+
+    /// One character per hunk, so the shape of the whole plan is visible at
+    /// a glance while only one hunk is on screen: the box number for an
+    /// assigned hunk, `·` for one left behind, and the hunk being looked at
+    /// shown in brackets.
     #[must_use]
     pub fn strip(&self) -> String {
-        self.marked
-            .iter()
-            .enumerate()
-            .map(|(i, &on)| match (i == self.at, on) {
-                (true, true) => '#',
-                (true, false) => 'o',
-                (false, true) => '+',
-                (false, false) => '·',
-            })
-            .collect()
+        let mut out = String::new();
+        for (i, slot) in self.boxes.iter().enumerate() {
+            let c = match slot {
+                Some(n) if *n < 10 => char::from(b'0' + n),
+                Some(_) => '+',
+                None => '·',
+            };
+            if i == self.at {
+                out.push('[');
+                out.push(c);
+                out.push(']');
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 
-    /// The marked hunks, for [`Patch::subset`](crate::Patch::subset).
+    /// The hunks in one box, for [`crate::Patch::subset`].
     #[must_use]
-    pub fn picked(&self) -> Vec<HunkId> {
+    pub fn picked(&self, commit: u8) -> Vec<HunkId> {
         self.ids
             .iter()
-            .zip(&self.marked)
-            .filter(|&(_, on)| *on)
+            .zip(&self.boxes)
+            .filter(|&(_, slot)| *slot == Some(commit))
             .map(|(&id, _)| id)
             .collect()
     }
 
+    /// How many hunks are in one box.
     #[must_use]
-    pub fn count(&self) -> usize {
-        self.marked.iter().filter(|&&on| on).count()
+    pub fn count(&self, commit: u8) -> usize {
+        self.boxes
+            .iter()
+            .filter(|slot| **slot == Some(commit))
+            .count()
     }
 
-    /// Whether every hunk is marked, which is a description, not a split:
-    /// nothing would be left behind.
+    /// How many hunks are in any box at all.
+    #[must_use]
+    pub fn assigned(&self) -> usize {
+        self.boxes.iter().flatten().count()
+    }
+
+    /// Whether every hunk is in the same single box, which is a description
+    /// rather than a split: nothing would be left behind.
     #[must_use]
     pub fn is_everything(&self) -> bool {
-        self.count() == self.ids.len()
+        self.pending().len() == 1 && self.assigned() == self.ids.len()
     }
 }
 
@@ -167,7 +247,7 @@ impl Split {
 mod tests {
     use super::*;
 
-    /// Two files, three hunks: enough to split more than one way.
+    /// Two files, three hunks: enough to plan more than one commit.
     fn split() -> Split {
         Split::new([
             (HunkId { file: 0, hunk: 0 }, "a.rs".to_owned()),
@@ -184,21 +264,12 @@ mod tests {
     }
 
     #[test]
-    fn go_to_moves_to_a_named_hunk_and_ignores_an_unknown_one() {
-        let mut s = split();
-        s.go_to(HunkId { file: 1, hunk: 0 });
-        assert_eq!(s.at(), 2);
-        s.go_to(HunkId { file: 9, hunk: 9 });
-        assert_eq!(s.at(), 2, "an unknown hunk leaves the cursor alone");
-    }
-
-    #[test]
     fn moving_decides_nothing() {
         let mut s = split();
         s.next();
         s.next();
         assert_eq!(s.at(), 2);
-        assert_eq!(s.count(), 0);
+        assert_eq!(s.assigned(), 0);
     }
 
     #[test]
@@ -211,72 +282,127 @@ mod tests {
         assert_eq!(s.at(), 2, "already at the last hunk");
     }
 
-    /// The point of the whole design: a hunk passed over can be marked once
-    /// the rest of the change has been read.
     #[test]
-    fn a_mark_can_be_changed_after_looking_elsewhere() {
+    fn go_to_moves_to_a_named_hunk_and_ignores_an_unknown_one() {
         let mut s = split();
-        s.next();
-        s.next();
-        s.first();
-        s.toggle();
-        assert_eq!(s.marks(), [true, false, false]);
-        s.toggle();
-        assert_eq!(s.marks(), [false, false, false]);
+        s.go_to(HunkId { file: 1, hunk: 0 });
+        assert_eq!(s.at(), 2);
+        s.go_to(HunkId { file: 9, hunk: 9 });
+        assert_eq!(s.at(), 2, "an unknown hunk leaves the cursor alone");
     }
 
     #[test]
-    fn marks_survive_moving_around() {
+    fn hunks_go_into_numbered_boxes() {
         let mut s = split();
-        s.toggle();
+        s.assign(Some(1));
+        s.next();
+        s.assign(Some(2));
+        s.next();
+        s.assign(Some(2));
+        assert_eq!(s.plan(), [Some(1), Some(2), Some(2)]);
+        assert_eq!(s.count(1), 1);
+        assert_eq!(s.count(2), 2);
+        assert_eq!(s.pending(), [1, 2]);
+        assert_eq!(s.next_box(), Some(1), "the lowest box is committed first");
+    }
+
+    /// The point of the whole design: a hunk can be moved to another commit,
+    /// or taken out again, until the split is actually made.
+    #[test]
+    fn the_same_key_assigns_and_then_takes_back() {
+        let mut s = split();
+        s.toggle(1);
+        assert_eq!(s.box_of(), Some(1));
+        s.toggle(2);
+        assert_eq!(s.box_of(), Some(2), "moved to another commit");
+        s.toggle(2);
+        assert_eq!(s.box_of(), None, "the same box again takes it out");
+        assert_eq!(s.assigned(), 0);
+    }
+
+    #[test]
+    fn a_plan_survives_looking_elsewhere() {
+        let mut s = split();
+        s.toggle(3);
         s.last();
         s.first();
-        assert!(s.is_marked());
-        assert_eq!(s.count(), 1);
+        assert_eq!(s.box_of(), Some(3));
+        assert_eq!(s.count(3), 1);
     }
 
     #[test]
-    fn a_file_is_marked_wherever_its_hunks_sit() {
+    fn a_whole_file_can_go_in_one_commit() {
         let mut s = split();
-        s.mark_file(true);
+        s.assign_file(Some(1));
         // Both of a.rs's hunks, and not b.rs's.
-        assert_eq!(s.marks(), [true, true, false]);
-        assert_eq!(s.at(), 0, "marking does not move");
-        s.mark_file(false);
-        assert_eq!(s.marks(), [false, false, false]);
+        assert_eq!(s.plan(), [Some(1), Some(1), None]);
+        assert_eq!(s.at(), 0, "assigning does not move");
+        s.assign_file(None);
+        assert_eq!(s.assigned(), 0);
     }
 
     #[test]
-    fn everything_can_be_marked_and_cleared() {
+    fn everything_can_be_assigned_and_cleared() {
         let mut s = split();
-        s.mark_all(true);
+        s.assign_all(Some(1));
         assert!(s.is_everything());
-        s.mark_all(false);
-        assert_eq!(s.count(), 0);
+        s.assign_all(None);
+        assert_eq!(s.assigned(), 0);
         assert!(!s.is_everything());
     }
 
+    /// Everything in one box leaves nothing behind, so it is a description.
+    /// Spread across two boxes it is a real split.
     #[test]
-    fn picked_gives_the_marked_hunks_in_order() {
+    fn one_box_holding_everything_is_not_a_split() {
         let mut s = split();
+        s.assign_all(Some(1));
+        assert!(s.is_everything());
         s.last();
-        s.mark(true);
-        s.first();
-        s.mark(true);
-        assert_eq!(
-            s.picked(),
-            [HunkId { file: 0, hunk: 0 }, HunkId { file: 1, hunk: 0 }]
-        );
+        s.assign(Some(2));
+        assert!(!s.is_everything(), "two boxes is a split");
     }
 
     #[test]
-    fn the_strip_shows_every_hunk_and_where_you_are() {
+    fn picked_gives_one_box_in_order() {
         let mut s = split();
-        s.toggle();
+        s.last();
+        s.assign(Some(1));
+        s.first();
+        s.assign(Some(1));
         s.next();
-        assert_eq!(s.strip(), "+o·");
-        s.toggle();
-        assert_eq!(s.strip(), "+#·");
+        s.assign(Some(2));
+        assert_eq!(
+            s.picked(1),
+            [HunkId { file: 0, hunk: 0 }, HunkId { file: 1, hunk: 0 }]
+        );
+        assert_eq!(s.picked(2), [HunkId { file: 0, hunk: 1 }]);
+        assert_eq!(s.picked(9), [], "an unused box holds nothing");
+    }
+
+    /// `planned` outlives committing a box, so "commit 2 of 3" can still say
+    /// how many there were.
+    #[test]
+    fn the_number_planned_only_ever_grows() {
+        let mut s = split();
+        s.assign(Some(3));
+        assert_eq!(s.planned(), 3);
+        s.assign(None);
+        assert_eq!(s.planned(), 3, "taking it out again does not forget");
+        assert_eq!(s.pending(), [], "but nothing is pending");
+    }
+
+    #[test]
+    fn the_strip_shows_the_plan_and_where_you_are() {
+        let mut s = split();
+        s.assign(Some(1));
+        s.next();
+        assert_eq!(s.strip(), "1[·]·");
+        s.assign(Some(2));
+        assert_eq!(s.strip(), "1[2]·");
+        s.last();
+        s.assign(Some(2));
+        assert_eq!(s.strip(), "12[2]");
     }
 
     #[test]
@@ -285,5 +411,15 @@ mod tests {
         assert_eq!(s.path(), "a.rs");
         s.last();
         assert_eq!(s.path(), "b.rs");
+    }
+
+    #[test]
+    fn restore_puts_a_hunk_back_in_its_box() {
+        let mut s = split();
+        s.restore(HunkId { file: 1, hunk: 0 }, 2, 4);
+        assert_eq!(s.plan(), [None, None, Some(2)]);
+        assert_eq!(s.planned(), 4);
+        s.restore(HunkId { file: 9, hunk: 9 }, 1, 4);
+        assert_eq!(s.assigned(), 1, "an unknown hunk is ignored");
     }
 }

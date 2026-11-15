@@ -172,6 +172,18 @@ impl Patch {
             .collect()
     }
 
+    /// A hunk's lines without its `@@` header.
+    ///
+    /// This is the part of a hunk a split leaves alone, so it is what a plan
+    /// spanning several commits is keyed by; see [`crate::plan::Plan`].
+    #[must_use]
+    pub fn hunk_content(&self, hunk: &Hunk) -> Vec<String> {
+        hunk.lines
+            .clone()
+            .map(|i| self.line(i).to_owned())
+            .collect()
+    }
+
     /// A git-format patch of just `chosen`, to apply to the tree as it was
     /// before the change.
     ///

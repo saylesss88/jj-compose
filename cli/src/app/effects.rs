@@ -7,7 +7,7 @@ use std::{
     process,
 };
 
-use jj_compose_core::{Draft, Field, Jj, Split, symbols};
+use jj_compose_core::{Draft, Field, Jj, Plan, Split, symbols};
 use ratatui::{
     DefaultTerminal,
     crossterm::{
@@ -80,8 +80,17 @@ impl App {
         let Some(split) = self.split.as_ref() else {
             return Ok(());
         };
-        let added = split.count();
-        let text = self.diff.patch().subset(&split.picked());
+        // Lowest box first, so the numbering is the order the commits end up
+        // in.
+        let Some(commit) = split.next_box() else {
+            return Ok(());
+        };
+        let added = split.count(commit);
+        let text = self.diff.patch().subset(&split.picked(commit));
+
+        // A HunkId only means anything within one diff, so whatever is still
+        // planned has to be recorded by content before the split moves it.
+        self.plan = Plan::capture(self.diff.patch(), split);
 
         // jj runs jj-compose as its diff editor and passes it this patch.
         let path = std::env::temp_dir().join(format!("jj-compose-{}.patch", process::id()));
@@ -92,6 +101,7 @@ impl App {
         result.map_err(|e| e.to_string())?;
 
         let left = self.reload(jj)?;
+        let waiting = self.split.as_ref().map_or(0, Split::assigned);
         // Rebuilt rather than appended: each tag needs re-anchoring once, to
         // whatever the remainder is after the last split of the session.
         self.recovery = self
@@ -107,11 +117,21 @@ impl App {
                 ]
             })
             .collect();
-        self.status = Some(Status::Info(format!(
-            "Committed {added} {}. {left} {} left to describe.",
-            app::plural(added, "hunk"),
-            app::plural(left, "hunk"),
-        )));
+        self.status = Some(Status::Info(if waiting > 0 {
+            let next = self.split.as_ref().and_then(Split::next_box).unwrap_or(0);
+            let planned = self.split.as_ref().map_or(0, Split::planned);
+            format!(
+                "Committed {added} {} as commit {commit} of {planned}. Now commit {next}: {waiting} {}.",
+                app::plural(added, "hunk"),
+                app::plural(waiting, "hunk"),
+            )
+        } else {
+            format!(
+                "Committed {added} {}. {left} {} left to describe.",
+                app::plural(added, "hunk"),
+                app::plural(left, "hunk"),
+            )
+        }));
         Ok(())
     }
 
@@ -139,8 +159,25 @@ impl App {
         self.view = view;
         self.original = original;
         self.field = Field::Type;
-        if let Some(split) = Split::new(self.diff.hunks().iter().map(|h| (h.id, h.path.clone()))) {
+        if let Some(mut split) =
+            Split::new(self.diff.hunks().iter().map(|h| (h.id, h.path.clone())))
+        {
+            // Put the still-uncommitted hunks back in the boxes they were
+            // planned into, which their new HunkIds cannot say.
+            self.plan.apply(self.diff.patch(), &mut split);
+            let waiting = split.assigned() > 0;
             self.enter_split(split);
+            if waiting {
+                // The next commit needs a message of its own; the
+                // description jj carried over belongs to whatever is left
+                // at the very end.
+                self.fields = Field::ALL.map(|field| ui::field_editor(field, ""));
+                self.raw = ui::raw_editor("");
+                self.view = View::Structured;
+                self.original = String::new();
+                self.focus = Focus::Editor;
+                self.zoomed = false;
+            }
         } else {
             self.split = None;
             self.focus = Focus::Editor;

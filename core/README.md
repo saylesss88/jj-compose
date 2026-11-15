@@ -63,14 +63,15 @@ returns the message text.
 
 ## Choosing hunks
 
-`Patch` parses a diff and `Split` tracks the choice. The two are separate on
-purpose: position and marks are independent, so a caller can read the whole
-change before deciding any of it.
+`Patch` parses a diff and `Split` holds the plan: which of several commits
+each hunk is destined for. The two are separate on purpose — position and
+plan are independent, so a caller can read the whole change before deciding
+any of it, and move a hunk between commits until the split is made.
 
 ```rust
 use jj_compose_core::{Jj, Patch, Result, Split, patch};
 
-fn first_hunk_only() -> Result<String> {
+fn first_commits_patch() -> Result<String> {
     let jj = Jj::new(None);
     let target = jj.resolve("@")?;
 
@@ -87,19 +88,27 @@ fn first_hunk_only() -> Result<String> {
         return Ok(String::new());
     };
 
-    split.mark(true);
+    // Boxes are numbered by the commit they will become, and committed
+    // lowest first, so the numbering is also the order.
+    split.assign(Some(1));
     split.next();
-    split.mark_file(true);
+    split.assign_file(Some(2));
 
-    // A git-format patch of just the marked hunks, to apply to the tree as
+    // A git-format patch of just commit 1's hunks, to apply to the tree as
     // it was before the change.
-    Ok(parsed.subset(&split.picked()))
+    Ok(parsed.subset(&split.picked(1)))
 }
 ```
 
 `strip_ansi` is there because `git_diff` asks `jj` for color, so the caller
 gets the user's own diff colors; the escape codes have to come off before
 parsing.
+
+Splitting a change into more than two commits means committing one box, then
+re-finding the rest: a `HunkId` only means anything within one diff, and
+committing part of a change shifts every later hunk's line numbers. Use
+[`Plan`] to carry the remaining boxes across — it keys them by each hunk's
+text, which a split leaves untouched.
 
 ## Splitting
 

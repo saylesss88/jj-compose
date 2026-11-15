@@ -40,13 +40,17 @@ impl App {
             KeyCode::Char('g') => self.overview = rows.iter().position(|r| r.hunk.is_some()),
             KeyCode::Char('G') => self.overview = rows.iter().rposition(|r| r.hunk.is_some()),
             // Marking works exactly as it does on the hunk itself.
-            KeyCode::Char(' ') => self.split.as_mut()?.toggle(),
-            KeyCode::Char('y') => self.split.as_mut()?.mark(true),
-            KeyCode::Char('n') => self.split.as_mut()?.mark(false),
-            KeyCode::Char('a') => self.split.as_mut()?.mark_file(true),
-            KeyCode::Char('d') => self.split.as_mut()?.mark_file(false),
-            KeyCode::Char('A') => self.split.as_mut()?.mark_all(true),
-            KeyCode::Char('C') => self.split.as_mut()?.mark_all(false),
+            // Assigning works exactly as it does on the hunk itself.
+            KeyCode::Char(c @ '1'..='9') => self.split.as_mut()?.toggle(digit(c)),
+            KeyCode::Char(' ') => self.split.as_mut()?.toggle(1),
+            KeyCode::Char('0') => self.split.as_mut()?.assign(None),
+            KeyCode::Char('a') => {
+                let commit = self.split.as_ref()?.box_of().unwrap_or(1);
+                self.split.as_mut()?.assign_file(Some(commit));
+            }
+            KeyCode::Char('d') => self.split.as_mut()?.assign_file(None),
+            KeyCode::Char('A') => self.split.as_mut()?.assign_all(Some(1)),
+            KeyCode::Char('C') => self.split.as_mut()?.assign_all(None),
             _ => return None,
         }
         // Keep the hunk on screen in step with the row under the cursor.
@@ -111,19 +115,26 @@ impl App {
         }
         let split = self.split.as_mut()?;
         match code {
-            KeyCode::Char(' ') => split.toggle(),
-            // `y` and `n` read as they do in `git add -p`, except that
-            // neither is final: an unmarked hunk can be marked later.
+            // A digit is the box; the same digit again takes it back out.
+            KeyCode::Char(c @ '1'..='9') => split.toggle(digit(c)),
+            KeyCode::Char(' ') => split.toggle(1),
+            KeyCode::Char('0') => split.assign(None),
+            // `y` reads as it does in `git add -p`, except that it is not
+            // final: a hunk can be moved or taken out later.
             KeyCode::Char('y') => {
-                split.mark(true);
+                split.assign(Some(1));
                 split.next();
             }
             KeyCode::Char('n' | '}') | KeyCode::Right => split.next(),
             KeyCode::Char('p' | '{') | KeyCode::Left => split.prev(),
-            KeyCode::Char('a') => split.mark_file(true),
-            KeyCode::Char('d') => split.mark_file(false),
-            KeyCode::Char('A') => split.mark_all(true),
-            KeyCode::Char('C') => split.mark_all(false),
+            // The file joins whichever commit this hunk is already in.
+            KeyCode::Char('a') => {
+                let commit = split.box_of().unwrap_or(1);
+                split.assign_file(Some(commit));
+            }
+            KeyCode::Char('d') => split.assign_file(None),
+            KeyCode::Char('A') => split.assign_all(Some(1)),
+            KeyCode::Char('C') => split.assign_all(None),
             KeyCode::Char('g') => split.first(),
             KeyCode::Char('G') => split.last(),
             _ => return None,
@@ -153,15 +164,26 @@ impl App {
         self.status = Some(Status::Info("Left split mode.".into()));
     }
 
-    /// Leave the hunks marked as they are and go write the message.
+    /// Leave the plan as it is and go write the next commit's message.
     fn write_message(&mut self) {
-        let marked = self.split.as_ref().map_or(0, Split::count);
+        let (commit, held, planned) = match self.split.as_ref() {
+            Some(split) => (
+                split.next_box().unwrap_or(0),
+                split.next_box().map_or(0, |n| split.count(n)),
+                split.pending().len(),
+            ),
+            None => (0, 0, 0),
+        };
         self.zoomed = false;
         self.focus = Focus::Editor;
-        self.status = Some(Status::Info(format!(
-            "{marked} {} marked. Write the message, then ^s to commit them.",
-            app::plural(marked, "hunk")
-        )));
+        self.status = Some(Status::Info(if planned == 0 {
+            "Nothing assigned yet. 1-9 puts the hunk on screen in a commit.".to_owned()
+        } else {
+            format!(
+                "Describing commit {commit} of {planned}: {held} {}. ^s commits it.",
+                app::plural(held, "hunk")
+            )
+        }));
     }
 
     /// Start choosing hunks for a commit, showing the first on its own.
@@ -182,4 +204,9 @@ impl App {
             )
         }))
     }
+}
+
+/// A digit key as the commit number it names.
+fn digit(c: char) -> u8 {
+    u8::try_from(c.to_digit(10).unwrap_or(1)).unwrap_or(1)
 }

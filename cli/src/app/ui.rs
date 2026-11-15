@@ -31,65 +31,13 @@ impl App {
         let accent = self.accent();
 
         // While splitting, the pane is one hunk and a tally, not the diff.
-        let splitting = match &self.split {
-            Some(split) if self.choosing() => Some((
-                split.at(),
-                split.total(),
-                split.path().to_owned(),
-                split.count(),
-                split.strip(),
-                split.is_marked(),
-            )),
-            _ => None,
-        };
-        if let Some(cursor) = self.overview.filter(|_| self.choosing()) {
-            let rows = self.overview_rows();
-            let marked = self.split.as_ref().map_or(0, Split::count);
-            let hunks = rows.iter().filter(|r| r.hunk.is_some()).count();
-            let title = Line::from(vec![
-                Span::raw(format!(" Hunks in {} ", self.change_id)),
-                immutable_marker(self.target.immutable),
-                Span::styled(format!("· {marked} of {hunks} marked "), Color::Green),
-            ]);
-            let block = pane(title, Some(accent));
-            let inner = block.inner(diff_area);
-            frame.render_widget(block, diff_area);
-            let height = usize::from(inner.height).max(1);
-            // Keep the cursor in view without a scrollbar's worth of state.
-            let top = cursor
-                .saturating_sub(height / 2)
-                .min(rows.len().saturating_sub(height));
-            let lines: Vec<Line<'static>> = rows
-                .iter()
-                .enumerate()
-                .skip(top)
-                .take(height)
-                .map(|(i, row)| overview_line(row, i == cursor))
-                .collect();
-            frame.render_widget(Paragraph::new(lines), inner);
-            frame.render_widget(self.status_line(), status);
+        if self.overview.is_some() && self.choosing() {
+            self.draw_overview(frame, diff_area, status, accent);
             return;
         }
 
-        if let Some((at, total, path, marked, strip, on)) = splitting {
-            let mut title = vec![
-                Span::raw(format!(" Split {} ", self.change_id)),
-                immutable_marker(self.target.immutable),
-                Span::raw(format!("· hunk {}/{total} ", at + 1)),
-                Span::raw(format!("· {path} ")),
-                // The strip is every hunk at once: `#` here and marked, `o`
-                // here and not, `+` marked elsewhere, `·` not.
-                Span::styled(format!("· [{strip}] "), Color::Cyan),
-                Span::styled(
-                    format!("· {marked} marked "),
-                    if on { Color::Green } else { Color::DarkGray },
-                ),
-            ];
-            title.retain(|span| !span.content.is_empty());
-            let title = Line::from(title);
-            let block = pane(title, Some(accent));
-            self.diff.render_hunk(frame, diff_area, block, at);
-            frame.render_widget(self.status_line(), status);
+        if self.choosing() {
+            self.draw_hunk(frame, diff_area, status, accent);
             return;
         }
 
@@ -122,6 +70,89 @@ impl App {
                 View::Raw => self.draw_raw(frame, form_area),
             }
         }
+        frame.render_widget(self.status_line(), status);
+    }
+
+    /// The whole change as a list, in place of the single hunk.
+    fn draw_overview(&mut self, frame: &mut Frame<'_>, area: Rect, status: Rect, accent: Color) {
+        let Some(cursor) = self.overview else {
+            return;
+        };
+        let rows = self.overview_rows();
+        let assigned = self.split.as_ref().map_or(0, Split::assigned);
+        let hunks = rows.iter().filter(|r| r.hunk.is_some()).count();
+        let boxes = self.split.as_ref().map(Split::pending).unwrap_or_default();
+        let title = Line::from(vec![
+            Span::raw(format!(" Hunks in {} ", self.change_id)),
+            immutable_marker(self.target.immutable),
+            Span::styled(format!("· {assigned} of {hunks} assigned "), Color::Green),
+            Span::styled(
+                if boxes.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "· {} {} ",
+                        boxes.len(),
+                        if boxes.len() == 1 {
+                            "commit"
+                        } else {
+                            "commits"
+                        }
+                    )
+                },
+                Color::Cyan,
+            ),
+        ]);
+        let block = pane(title, Some(accent));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let height = usize::from(inner.height).max(1);
+        // Keep the cursor in view without a scrollbar's worth of state.
+        let top = cursor
+            .saturating_sub(height / 2)
+            .min(rows.len().saturating_sub(height));
+        let lines: Vec<Line<'static>> = rows
+            .iter()
+            .enumerate()
+            .skip(top)
+            .take(height)
+            .map(|(i, row)| overview_line(row, i == cursor))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), inner);
+        frame.render_widget(self.status_line(), status);
+    }
+
+    /// One hunk filling the pane, with the plan's shape in the title.
+    fn draw_hunk(&mut self, frame: &mut Frame<'_>, area: Rect, status: Rect, accent: Color) {
+        let Some(split) = self.split.as_ref() else {
+            return;
+        };
+        let (at, total, path) = (split.at(), split.total(), split.path().to_owned());
+        let (assigned, strip, commit) = (split.assigned(), split.strip(), split.box_of());
+        let mut title = vec![
+            Span::raw(format!(" Split {} ", self.change_id)),
+            immutable_marker(self.target.immutable),
+            Span::raw(format!("· hunk {}/{total} ", at + 1)),
+            Span::raw(format!("· {path} ")),
+            // The strip is the whole plan at once: a digit per hunk, `·` for
+            // one left behind, and brackets round the one on screen.
+            Span::styled(format!("· {strip} "), Color::Cyan),
+            Span::styled(
+                match commit {
+                    Some(n) => format!("· commit {n} "),
+                    None => "· unassigned ".to_owned(),
+                },
+                if commit.is_some() {
+                    Color::Green
+                } else {
+                    Color::DarkGray
+                },
+            ),
+            Span::styled(format!("· {assigned}/{total} planned "), Color::DarkGray),
+        ];
+        title.retain(|span| !span.content.is_empty());
+        let block = pane(Line::from(title), Some(accent));
+        self.diff.render_hunk(frame, area, block, at);
         frame.render_widget(self.status_line(), status);
     }
 
@@ -197,11 +228,12 @@ impl App {
         }
         if self.overview.is_some() && self.choosing() {
             let keys =
-                " Space mark · j/k row · a/d file · A/C all · Enter read it · f close · Esc leave";
+                " 1-9 commit · 0 none · j/k row · a/d file · Enter read it · f close · Esc leave";
             return Line::from(vec![Span::raw(keys).dark_gray()]);
         }
         if self.choosing() {
-            let keys = " Space mark · n/p hunk · a/d file · A/C all · Enter message · Esc leave";
+            let keys =
+                " 1-9 commit · 0 none · n/p hunk · a/d file · f list · Enter message · Esc leave";
             return Line::from(vec![Span::raw(keys).dark_gray()]);
         }
         let keys = match (self.focus, self.keymap, self.vim.mode) {
@@ -213,10 +245,20 @@ impl App {
                 )
             }
             // A pending split changes what ^s does, so it says so.
-            (Focus::Editor, Keymap::Default, _) => self.split.as_ref().map(Split::count).map_or_else(|| " Tab next · Enter next/newline · Alt-← diff · Alt-s split · ^t raw/form · ^s save · Esc quit".to_owned(), |marked| format!(
-                     " Tab next · Alt-← hunks · ^s commit {marked} {} · ^t raw/form · Esc quit",
-                     plural(marked, "hunk")
-                 )),
+            (Focus::Editor, Keymap::Default, _) => self
+                .split
+                .as_ref()
+                .and_then(Split::next_box)
+                .map_or_else(
+                    || " Tab next · Enter next/newline · Alt-← diff · Alt-s split · ^t raw/form · ^s save · Esc quit".to_owned(),
+                    |commit| {
+                        let held = self.split.as_ref().map_or(0, |s| s.count(commit));
+                        format!(
+                            " Tab next · Alt-← hunks · ^s commit {commit} ({held} {}) · ^t raw/form · Esc quit",
+                            plural(held, "hunk")
+                        )
+                    },
+                ),
             (Focus::Editor, Keymap::Vim, vim::Mode::Insert) => {
                 " Esc normal · Tab next · Enter next/newline · ^t raw/form · ^s save".to_owned()
             }
@@ -303,8 +345,8 @@ fn header_counter(len: usize) -> Span<'static> {
 fn overview_line(row: &overview::Row, cursor: bool) -> Line<'static> {
     let color = match row.kind {
         overview::Kind::File => Color::Cyan,
-        overview::Kind::Marked => Color::Green,
-        overview::Kind::Unmarked => Color::Gray,
+        overview::Kind::InBox(_) => Color::Green,
+        overview::Kind::Loose => Color::Gray,
     };
     let mut style = Style::new().fg(color);
     if row.kind == overview::Kind::File {
