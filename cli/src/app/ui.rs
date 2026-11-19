@@ -82,33 +82,29 @@ impl App {
         let assigned = self.split.as_ref().map_or(0, Split::assigned);
         let hunks = rows.iter().filter(|r| r.hunk.is_some()).count();
         let boxes = self.split.as_ref().map_or_else(Vec::new, Split::pending);
-        let title = Line::from(vec![
+        let mut title = Line::from(vec![
             Span::raw(format!(" Hunks in {} ", self.change_id)),
             immutable_marker(self.target.immutable),
             Span::styled(format!("· {assigned} of {hunks} assigned "), Color::Green),
-            Span::styled(
-                if boxes.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "· {} {} ",
-                        boxes.len(),
-                        if boxes.len() == 1 {
-                            "commit"
-                        } else {
-                            "commits"
-                        }
-                    )
-                },
-                Color::Cyan,
-            ),
         ]);
+        // A legend: every pending box in the color its rows carry, so the
+        // colors below need no remembering.
+        if !boxes.is_empty() {
+            title.push_span(Span::raw(format!(
+                "· {} {} ",
+                boxes.len(),
+                plural(boxes.len(), "commit")
+            )));
+            for n in boxes {
+                title.push_span(Span::styled(format!("{n} "), box_color(n)));
+            }
+        }
+
         // The selection, as hunk numbers, and each row's hunk number.
         let selected = self.visual.map(|from| {
             let to = self.split.as_ref().map_or(from, Split::at);
             from.min(to)..=from.max(to)
         });
-        let mut title = title;
         if let Some(range) = &selected {
             let n = range.end() - range.start() + 1;
             title.spans.push(Span::styled(
@@ -155,27 +151,31 @@ impl App {
             return;
         };
         let (at, total, path) = (split.at(), split.total(), split.path().to_owned());
-        let (assigned, strip, commit) = (split.assigned(), split.strip(), split.box_of());
+        let (assigned, commit) = (split.assigned(), split.box_of());
         let mut title = vec![
             Span::raw(format!(" Split {} ", self.change_id)),
             immutable_marker(self.target.immutable),
             Span::raw(format!("· hunk {}/{total} ", at + 1)),
-            Span::raw(format!("· {path} ")),
-            // The strip is the whole plan at once: a digit per hunk, `·` for
-            // one left behind, and brackets round the one on screen.
-            Span::styled(format!("· {strip} "), Color::Cyan),
-            Span::styled(
-                commit.map_or_else(|| "· unassigned ".to_owned(), |n| format!("· commit {n} ")),
-                if commit.is_some() {
-                    Color::Green
-                } else {
-                    Color::DarkGray
-                },
-            ),
-            Span::styled(format!("· {assigned}/{total} planned "), Color::DarkGray),
+            Span::raw(format!("· {path} · ")),
         ];
+        // The strip is the whole plan at once: a digit per hunk in its box's
+        // color, `·` for one left behind, brackets round the one on screen.
+        title.extend(strip_spans(split.plan(), at));
+        title.push(Span::styled(
+            commit.map_or_else(
+                || " · unassigned ".to_owned(),
+                |n| format!(" · commit {n} "),
+            ),
+            commit.map_or(Color::DarkGray, box_color),
+        ));
+        title.push(Span::styled(
+            format!("· {assigned}/{total} planned "),
+            Color::DarkGray,
+        ));
         title.retain(|span| !span.content.is_empty());
-        let block = pane(Line::from(title), Some(accent));
+        // In split mode nothing is being typed, so the border is free to carry
+        // the current hunk's box instead of the keymap's accent.
+        let block = pane(Line::from(title), Some(commit.map_or(accent, box_color)));
         self.diff.render_hunk(frame, area, block, at);
         frame.render_widget(self.status_line(), status);
     }
@@ -336,6 +336,44 @@ pub(super) fn field_editor(field: Field, text: &str) -> TextArea<'static> {
     editor
 }
 
+/// The color standing for commit `n`.
+///
+/// Six, not nine: a terminal has eight colors it can be trusted with, and
+/// red and green are spoken for by errors and the diff itself. Past the
+/// sixth box the colors repeat, which is why the digit is always drawn too
+/// --- the color is a second reading of it, never the only one.
+pub(super) const fn box_color(n: u8) -> Color {
+    const WHEEL: [Color; 6] = [
+        Color::Cyan,
+        Color::Magenta,
+        Color::Yellow,
+        Color::Blue,
+        Color::LightGreen,
+        Color::LightMagenta,
+    ];
+    WHEEL[(n as usize).saturating_sub(1) % WHEEL.len()]
+}
+
+/// The plan as one character per hunk, each in its box's color, with the
+/// hunk on screen in brackets.
+///
+/// Built here rather than in core because a colored strip is spans, not a
+/// string, and the coloring is the whole point of it.
+fn strip_spans(plan: &[Option<u8>], at: usize) -> Vec<Span<'static>> {
+    plan.iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            let (text, color) = match slot {
+                Some(n) if *n < 10 => (char::from(b'0' + n).to_string(), box_color(*n)),
+                Some(_) => ("+".to_owned(), Color::Gray),
+                None => ("·".to_owned(), Color::DarkGray),
+            };
+            let text = if i == at { format!("[{text}]") } else { text };
+            Span::styled(text, color)
+        })
+        .collect()
+}
+
 /// A bordered pane, drawn in `accent` when focused.
 fn pane(title: Line<'static>, accent: Option<Color>) -> Block<'static> {
     let style = Style::new().fg(accent.unwrap_or(Color::DarkGray));
@@ -371,9 +409,9 @@ fn header_counter(len: usize) -> Span<'static> {
 /// One row of the overview: a file heading, or a hunk marked or not.
 fn overview_line(row: &overview::Row, cursor: bool, selected: bool) -> Line<'static> {
     let color = match row.kind {
-        overview::Kind::File => Color::Cyan,
-        overview::Kind::InBox(_) => Color::Green,
-        overview::Kind::Loose => Color::Gray,
+        overview::Kind::File => Color::White,
+        overview::Kind::InBox(n) => box_color(n),
+        overview::Kind::Loose => Color::DarkGray,
     };
     let mut style = Style::new().fg(color);
     if row.kind == overview::Kind::File {
@@ -400,7 +438,16 @@ pub(super) fn immutable_marker(immutable: bool) -> Span<'static> {
 }
 #[cfg(test)]
 mod tests {
-    use super::immutable_marker;
+    use super::{box_color, immutable_marker};
+
+    /// Six colors, so a seventh box reuses the first. The digit is what
+    /// distinguishes them; the color only groups.
+    #[test]
+    fn the_box_colors_wrap_rather_than_running_out() {
+        assert_eq!(box_color(1), box_color(7));
+        assert_ne!(box_color(1), box_color(2));
+        assert_eq!(box_color(1), ratatui::style::Color::Cyan);
+    }
 
     #[test]
     fn the_immutable_marker_shows_only_on_protected_history() {

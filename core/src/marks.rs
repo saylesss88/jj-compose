@@ -207,30 +207,6 @@ impl Split {
         self.planned = self.planned.max(planned);
     }
 
-    /// One character per hunk, so the shape of the whole plan is visible at
-    /// a glance while only one hunk is on screen: the box number for an
-    /// assigned hunk, `·` for one left behind, and the hunk being looked at
-    /// shown in brackets.
-    #[must_use]
-    pub fn strip(&self) -> String {
-        let mut out = String::new();
-        for (i, slot) in self.boxes.iter().enumerate() {
-            let c = match slot {
-                Some(n) if *n < 10 => char::from(b'0' + n),
-                Some(_) => '+',
-                None => '·',
-            };
-            if i == self.at {
-                out.push('[');
-                out.push(c);
-                out.push(']');
-            } else {
-                out.push(c);
-            }
-        }
-        out
-    }
-
     /// The hunks in one box, for [`crate::Patch::subset`].
     #[must_use]
     pub fn picked(&self, commit: u8) -> Vec<HunkId> {
@@ -441,16 +417,15 @@ mod tests {
     }
 
     #[test]
-    fn the_strip_shows_the_plan_and_where_you_are() {
+    fn the_plan_is_parallel_to_the_hunks() {
         let mut s = split();
         s.assign(Some(1));
         s.next();
-        assert_eq!(s.strip(), "1[·]·");
+        assert_eq!(s.plan(), [Some(1), None, None]);
         s.assign(Some(2));
-        assert_eq!(s.strip(), "1[2]·");
         s.last();
         s.assign(Some(2));
-        assert_eq!(s.strip(), "12[2]");
+        assert_eq!(s.plan(), [Some(1), Some(2), Some(2)]);
     }
 
     #[test]
