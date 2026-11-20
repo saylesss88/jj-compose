@@ -243,9 +243,45 @@ impl App {
     }
 
     /// The whole change as rows, for the overview.
+    /// Every hunk of the diff as [`Split::new`] wants it: its id, its file,
+    /// and how many choices it holds.
+    pub(super) fn splittable(&self) -> Vec<(jj_compose_core::HunkId, String, usize)> {
+        let patch = self.diff.patch();
+        self.diff
+            .hunks()
+            .iter()
+            .map(|h| {
+                let changes = patch
+                    .files()
+                    .get(h.id.file)
+                    .and_then(|f| f.hunks.get(h.id.hunk))
+                    .map_or(0, |hunk| patch.changed_lines(hunk).len());
+                (h.id, h.path.clone(), changes)
+            })
+            .collect()
+    }
+
     pub(super) fn overview_rows(&self) -> Vec<overview::Row> {
-        let plan = self.split.as_ref().map_or(&[][..], Split::plan);
-        overview::build(self.diff.patch(), plan, &self.symbols)
+        let Some(split) = self.split.as_ref() else {
+            return overview::build(self.diff.patch(), &[], &self.symbols);
+        };
+        // A divided hunk is not in a box of its own, so the list has to be
+        // told about the division rather than reading the hunk's box.
+        let plan: Vec<overview::Where> = (0..split.total())
+            .map(|i| match split.division(i) {
+                Some((_, boxes)) => overview::Where::Divided {
+                    taken: boxes.iter().filter(|b| b.is_some()).count(),
+                    total: boxes.len(),
+                },
+                None => split
+                    .plan()
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .map_or(overview::Where::Nowhere, overview::Where::Whole),
+            })
+            .collect();
+        overview::build(self.diff.patch(), &plan, &self.symbols)
     }
 
     /// Whether hunks are being chosen right now: a split is under way, it
@@ -1004,14 +1040,32 @@ index 3333333..4444444 100644
         assert!(app.split.is_none());
     }
 
+    /// One hunk holding one change is the only unsplittable change: either
+    /// commit would come out empty.
     #[test]
-    fn a_change_with_one_hunk_cannot_be_split() {
-        let one = b"diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+    fn a_change_with_a_single_change_in_it_cannot_be_split() {
+        let one = b"diff --git a/a.rs b/a.rs\n@@ -1,0 +1,1 @@\n+new\n";
         let mut app = app("", Keymap::Default);
         app.diff = DiffView::from_output(one, "").unwrap();
         alt(&mut app, 's');
         assert!(app.split.is_none());
         assert!(matches!(app.status, Some(Status::Error(_))));
+    }
+
+    /// One hunk with two changes in it can be split, by dividing it. The
+    /// old guard turned this away for having only one hunk.
+    #[test]
+    fn a_change_with_one_hunk_can_still_be_divided() {
+        let one = b"diff --git a/a.rs b/a.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+        let mut app = app("", Keymap::Default);
+        app.diff = DiffView::from_output(one, "").unwrap();
+        alt(&mut app, 's');
+        assert!(app.split.is_some(), "{:?}", app.status.is_some());
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('1'));
+        let split = app.split.as_ref().unwrap();
+        assert_eq!(split.line_plan(), Some([Some(1), None].as_slice()));
+        assert!(!split.is_everything(), "the other line stays behind");
     }
 
     /// A split left mid-decision must keep the keys with the diff pane; the
@@ -1020,9 +1074,7 @@ index 3333333..4444444 100644
     #[test]
     fn a_split_in_progress_always_has_the_keys() {
         let mut app = splitting_app();
-        app.enter_split(
-            Split::new(app.diff.hunks().iter().map(|h| (h.id, h.path.clone()))).unwrap(),
-        );
+        app.enter_split(Split::new(app.splittable()).unwrap());
         assert_eq!(app.focus, Focus::Diff);
         assert!(app.choosing());
 

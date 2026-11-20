@@ -289,11 +289,11 @@ impl App {
     }
 
     pub(super) fn start_split(&mut self) {
-        match Split::new(self.diff.hunks().iter().map(|h| (h.id, h.path.clone()))) {
+        match Split::new(self.splittable()) {
             Some(split) => self.enter_split(split),
             None => {
                 self.status = Some(Status::Error(
-                    "nothing to split: this change has fewer than two hunks".into(),
+                    "nothing to split: this change has one hunk with one change in it".into(),
                 ));
             }
         }

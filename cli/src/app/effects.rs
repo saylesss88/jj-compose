@@ -160,9 +160,7 @@ impl App {
         self.view = view;
         self.original = original;
         self.field = Field::Type;
-        if let Some(mut split) =
-            Split::new(self.diff.hunks().iter().map(|h| (h.id, h.path.clone())))
-        {
+        if let Some(mut split) = Split::new(self.splittable()) {
             // Put the still-uncommitted hunks back in the boxes they were
             // planned into, which their new HunkIds cannot say.
             self.plan.apply(self.diff.patch(), &mut split);

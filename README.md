@@ -15,9 +15,9 @@ diff.
 
 - **Strict Conventional Commits:** Draft structured messages with automatic
   validation for types, scopes, header lengths (50/72 chars), and Git trailers.
-- **Line-Level Splitting:** When one hunk holds two unrelated edits, `e`
-  divides it so each line can go to a different commit — a rename in one, the
-  logic change beside it in another.
+- **Line-Level Splitting:** When one hunk holds two unrelated edits, `e` divides
+  it so each line can go to a different commit. A rename in one, the logic
+  change beside it in another.
 - **Interactive Hunk Splitting:** Press `Alt-s` to review your change hunk by
   hunk. Mark the pieces that belong together and commit them instantly—zero
   external `ui.diff-editor` configuration required.
@@ -453,19 +453,19 @@ amount of moving hunks around will separate them. `e` opens the hunk being
 looked at so each of its `+`/`-` lines can go somewhere of its own; `e` again
 closes it.
 
-| Key                            | Action                                    |
-| ------------------------------ | ----------------------------------------- |
-| `1`–`9`                        | Put this line in that commit              |
-| the same digit again, or `0`   | Take it back out                          |
-| `j` / `k`, `n` / `p`           | Next / previous line                      |
-| `e`                            | Close it; lines that agree fold back up   |
-| `Ctrl-d` / `Ctrl-u`            | Scroll a hunk taller than the pane        |
+| Key                          | Action                                  |
+| ---------------------------- | --------------------------------------- |
+| `1`–`9`                      | Put this line in that commit            |
+| the same digit again, or `0` | Take it back out                        |
+| `j` / `k`, `n` / `p`         | Next / previous line                    |
+| `e`                          | Close it; lines that agree fold back up |
+| `Ctrl-d` / `Ctrl-u`          | Scroll a hunk taller than the pane      |
 
 The lines are shown in the order they will be written, which is not quite the
-order `jj diff` prints them in: git groups the removals and then the
-additions, and a divided hunk pairs each removal with the addition replacing
-it. A line no commit takes is struck through, so what is left behind is as
-visible as what is taken.
+order `jj diff` prints them in: git groups the removals and then the additions,
+and a divided hunk pairs each removal with the addition replacing it. A line no
+commit takes is struck through, so what is left behind is as visible as what is
+taken.
 
 ```text
 ┌ Divide wvkqrwwn · hunk 2/4 · src/app.rs · 11·· · 2/4 taken ─┐
@@ -478,23 +478,22 @@ visible as what is taken.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-In the `f` list a divided hunk is marked `*` with a count of its lines, since
-it is in no one box:
+In the `f` list a divided hunk is marked `*` with a count of its lines, since it
+is in no one box:
 
 ```text
 │ src/app.rs  +2 -2  1 of 2 assigned              │
 │ *   1    +1   -1  impl App  2 of 4 lines        │
 ```
 
-Dividing decides nothing by itself — the lines start out going wherever the
-hunk was going — and a division you open and undo leaves no trace. Lines are
-the smallest unit: there is no taking half a line.
+Dividing decides nothing by itself, the lines start out going wherever the hunk
+was going, and a division you open and undo leaves no trace. Lines are the
+smallest unit: there is no taking half a line.
 
-One limit worth knowing: a division spanning two boxes only survives as far as
-the next commit. Box 1's lines are committed, and the lines you put in box 2
-come back unassigned, to be decided again on the remainder. Dividing for the
-commit you are making now always works; dividing three commits ahead does not
-hold.
+A division is not limited to two commits: the lines of one hunk can go to as
+many boxes as you like, and the plan survives each commit the same way a
+whole-hunk plan does. Once the lines still waiting all agree on one box, the
+hunk simply goes there whole and stops being divided.
 
 ## Rewriting released history
 

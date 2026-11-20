@@ -504,6 +504,9 @@ fn overview_line(row: &overview::Row, cursor: bool, selected: bool) -> Line<'sta
     let color = match row.kind {
         overview::Kind::File => Color::White,
         overview::Kind::InBox(n) => box_color(n),
+        // No one box to color it with. Between a loose row and a decided
+        // one, which is what it is: the `*` says to look closer.
+        overview::Kind::Divided => Color::Gray,
         overview::Kind::Loose => Color::DarkGray,
     };
     let mut style = Style::new().fg(color);

@@ -204,9 +204,13 @@ binary. A binary file has no hunks, so its change can't be separated from the
 rest.
 
 Lines are the smallest unit: a hunk can be divided with `Split::divide`, but
-there's no taking half a line. A division spanning several boxes survives only
-as far as the next commit — `Plan` re-finds a divided hunk's lines by their
-text, and the lines just committed are no longer there to find.
+there's no taking half a line.
+
+A division can span any number of boxes and survives each split: `Plan` records
+a divided hunk's lines by their own text, and matches them against what's left
+in order. It deliberately skips the box being committed, whose lines won't be in
+the change afterwards. Recording those would make the matching look for lines
+that are gone, and hand a repeated line to the wrong box.
 
 ## Examples
 
