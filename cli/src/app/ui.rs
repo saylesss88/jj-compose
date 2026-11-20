@@ -11,7 +11,7 @@ use ratatui::{
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
 use super::{App, Focus, Keymap, Status, View, plural};
-use crate::vim;
+use crate::{diff::Mark, vim};
 
 impl App {
     pub(super) fn draw(&mut self, frame: &mut Frame<'_>) {
@@ -37,7 +37,11 @@ impl App {
         }
 
         if self.choosing() {
-            self.draw_hunk(frame, diff_area, status, accent);
+            if self.split.as_ref().is_some_and(Split::is_divided) {
+                self.draw_divided(frame, diff_area, status);
+            } else {
+                self.draw_hunk(frame, diff_area, status, accent);
+            }
             return;
         }
 
@@ -143,6 +147,91 @@ impl App {
             .collect();
         frame.render_widget(Paragraph::new(lines), inner);
         frame.render_widget(self.status_line(), status);
+    }
+
+    /// One hunk opened up, a line at a time, with where each line is going.
+    fn draw_divided(&mut self, frame: &mut Frame<'_>, area: Rect, status: Rect) {
+        let Some(split) = self.split.as_ref() else {
+            return;
+        };
+        let (at, total, path) = (split.at(), split.total(), split.path().to_owned());
+        let plan = split.line_plan().unwrap_or_default().to_vec();
+        let cursor = split.line_at();
+        let Some(rows) = self.divided_rows(at, &plan, cursor) else {
+            return;
+        };
+
+        let taken = plan.iter().flatten().count();
+        let mut title = vec![
+            Span::raw(format!(" Divide {} ", self.change_id)),
+            immutable_marker(self.target.immutable),
+            Span::raw(format!("· hunk {}/{total} ", at + 1)),
+            Span::raw(format!("· {path} · ")),
+        ];
+        // One character per line, so the division's shape stays visible
+        // while the cursor is on one line of it.
+        for (i, slot) in plan.iter().enumerate() {
+            let (text, color) = match slot {
+                Some(n) if *n < 10 => (char::from(b'0' + n).to_string(), box_color(*n)),
+                Some(_) => ("+".to_owned(), Color::Gray),
+                None => ("·".to_owned(), Color::DarkGray),
+            };
+            let text = if i == cursor {
+                format!("[{text}]")
+            } else {
+                text
+            };
+            title.push(Span::styled(text, color));
+        }
+        title.push(Span::styled(
+            format!(" · {taken}/{} taken ", plan.len()),
+            Color::DarkGray,
+        ));
+        title.retain(|span| !span.content.is_empty());
+
+        let line_box = split.box_of_line();
+        let block = pane(
+            Line::from(title),
+            Some(line_box.map_or(Color::DarkGray, box_color)),
+        );
+        self.diff.render_divided(frame, area, block, at, &rows);
+        frame.render_widget(self.status_line(), status);
+    }
+
+    /// Which patch lines the divided view draws, in order, and what to say
+    /// about each.
+    ///
+    /// The order is the one `Patch::ordered_lines` gives: a removal next to
+    /// the addition replacing it. That is also the order the lines are
+    /// written in, so what is on screen is what will be committed.
+    fn divided_rows(
+        &self,
+        at: usize,
+        plan: &[Option<u8>],
+        cursor: usize,
+    ) -> Option<Vec<(usize, Mark)>> {
+        let id = self.diff.hunks().get(at)?.id;
+        let patch = self.diff.patch();
+        let hunk = patch.files().get(id.file)?.hunks.get(id.hunk)?;
+        let mut nth = 0;
+        Some(
+            patch
+                .ordered_lines(hunk)
+                .into_iter()
+                .map(|l| {
+                    if matches!(patch.line(l).as_bytes().first(), Some(b'+' | b'-')) {
+                        let mark = Mark::Line {
+                            commit: plan.get(nth).copied().flatten(),
+                            cursor: nth == cursor,
+                        };
+                        nth += 1;
+                        (l, mark)
+                    } else {
+                        (l, Mark::Context)
+                    }
+                })
+                .collect(),
+        )
     }
 
     /// One hunk filling the pane, with the plan's shape in the title.
@@ -259,8 +348,12 @@ impl App {
             let keys = " 1-9 commit · 0 none · j/k row · V select · a/d file · Enter read it · f close · Esc leave";
             return Line::from(vec![Span::raw(keys).dark_gray()]);
         }
+        if self.choosing() && self.split.as_ref().is_some_and(Split::is_divided) {
+            let keys = " 1-9 commit · 0 none · j/k line · e close · Enter message · Esc leave";
+            return Line::from(vec![Span::raw(keys).dark_gray()]);
+        }
         if self.choosing() {
-            let keys = " 1-9 commit · 0 none · n/p hunk · a/d file · f list · V select · Enter message · Esc leave";
+            let keys = " 1-9 commit · 0 none · n/p hunk · a/d file · e divide · f list · Enter message · Esc leave";
             return Line::from(vec![Span::raw(keys).dark_gray()]);
         }
         let keys = match (self.focus, self.keymap, self.vim.mode) {
@@ -342,7 +435,7 @@ pub(super) fn field_editor(field: Field, text: &str) -> TextArea<'static> {
 /// red and green are spoken for by errors and the diff itself. Past the
 /// sixth box the colors repeat, which is why the digit is always drawn too
 /// --- the color is a second reading of it, never the only one.
-pub(super) const fn box_color(n: u8) -> Color {
+pub(crate) const fn box_color(n: u8) -> Color {
     const WHEEL: [Color; 6] = [
         Color::Cyan,
         Color::Magenta,

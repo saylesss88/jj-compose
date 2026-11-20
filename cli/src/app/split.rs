@@ -140,6 +140,11 @@ impl App {
         if self.overview.is_some() {
             return self.overview_key(code, ctrl);
         }
+        // A divided hunk takes the keys over: the cursor is a line now, and
+        // a digit decides that line rather than the whole hunk.
+        if self.split.as_ref().is_some_and(Split::is_divided) {
+            return self.divided_key(code, ctrl);
+        }
         match code {
             KeyCode::Char('f') => {
                 self.open_overview(false);
@@ -149,6 +154,22 @@ impl App {
             // selecting from the hunk on screen.
             KeyCode::Char('v' | 'V') => {
                 self.open_overview(true);
+                return None;
+            }
+            // Open this hunk up so its lines can go to different commits.
+            KeyCode::Char('e') => {
+                let at = self.split.as_ref()?.at();
+                let lines = self.hunk_lines(at);
+                let count = lines.len();
+                self.split.as_mut()?.divide(lines);
+                if self.split.as_ref().is_some_and(Split::is_divided) {
+                    self.diff.show_hunk(at);
+                } else {
+                    self.status = Some(Status::Info(format!(
+                        "nothing to divide: this hunk changes {count} line{}",
+                        if count == 1 { "" } else { "s" }
+                    )));
+                }
                 return None;
             }
             _ => {}
@@ -211,6 +232,58 @@ impl App {
 
         if let Some(at) = self.split.as_ref().map(Split::at) {
             self.diff.show_hunk(at);
+        }
+        None
+    }
+
+    /// The `+`/`-` lines of one hunk, as [`Split::divide`] wants them.
+    fn hunk_lines(&self, at: usize) -> Vec<usize> {
+        let Some(id) = self.diff.hunks().get(at).map(|h| h.id) else {
+            return Vec::new();
+        };
+        let patch = self.diff.patch();
+        patch
+            .files()
+            .get(id.file)
+            .and_then(|f| f.hunks.get(id.hunk))
+            .map(|hunk| patch.changed_lines(hunk))
+            .unwrap_or_default()
+    }
+
+    /// Deciding one line at a time, inside a hunk that has been opened up.
+    ///
+    /// Only the keys that mean something here are handled: `j`/`k` move
+    /// between the hunk's own lines, so the pane no longer scrolls, and
+    /// `Ctrl-d`/`Ctrl-u` are what a hunk taller than the pane is read with.
+    fn divided_key(&mut self, code: KeyCode, ctrl: bool) -> Option<Exit> {
+        match code {
+            // Close it. Lines that all agree fold back into the hunk.
+            KeyCode::Char('e') => {
+                self.split.as_mut()?.undivide();
+                if self.split.as_ref().is_some_and(Split::is_divided) {
+                    self.status = Some(Status::Info(
+                        "the lines of this hunk go to different commits, so it stays divided"
+                            .into(),
+                    ));
+                }
+            }
+            KeyCode::Char('d') if ctrl => self.diff.scroll_down(self.diff.half_page()),
+            KeyCode::Char('u') if ctrl => self.diff.scroll_up(self.diff.half_page()),
+            KeyCode::Char('j' | 'n') | KeyCode::Down => self.split.as_mut()?.next_line(),
+            KeyCode::Char('k' | 'p') | KeyCode::Up => self.split.as_mut()?.prev_line(),
+            KeyCode::Char(c @ '1'..='9') => self.split.as_mut()?.toggle_line(digit(c)),
+            KeyCode::Char(' ') => self.split.as_mut()?.toggle_line(1),
+            KeyCode::Char('0') => self.split.as_mut()?.assign_line(None),
+            // As in the hunk view: not final, just quicker.
+            KeyCode::Char('y') => {
+                let split = self.split.as_mut()?;
+                split.assign_line(Some(1));
+                split.next_line();
+            }
+            // Leaving split mode entirely still works from in here.
+            KeyCode::Esc | KeyCode::Char('q') => self.cancel_split(),
+            KeyCode::Enter => self.write_message(),
+            _ => {}
         }
         None
     }

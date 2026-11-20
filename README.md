@@ -381,36 +381,36 @@ move both and every assigning key works the same in either view. `Enter`, `f` or
 
 ### Selecting a run of hunks
 
-Pressing a digit twenty times for twenty hunks is tedious, so the list has
-Vim's visual line mode. `V` (or `v`) starts a selection at the cursor, moving
+Pressing a digit twenty times for twenty hunks is tedious, so the list has Vim's
+visual line mode. `V` (or `v`) starts a selection at the cursor, moving
 stretches it, and one digit puts every hunk in it in that commit:
 
-| Key                            | Action                                                  |
-| ------------------------------ | ------------------------------------------------------- |
-| `V` / `v`                      | Start or cancel a selection                             |
-| `j` / `k`, `Ctrl-d` / `Ctrl-u` | Stretch it a hunk / half a page                         |
-| `]` / `[`                      | Stretch it to the next file / back to a file's start    |
-| `g` / `G`                      | Stretch it to the first / last hunk                     |
-| `o`                            | Jump to the other end of the selection                  |
-| `1`–`9`                        | Put the whole selection in that commit                  |
-| `0`, `d`, `x`                  | Take the whole selection back out                       |
-| `Esc`                          | Cancel the selection; a second `Esc` closes the list    |
+| Key                            | Action                                               |
+| ------------------------------ | ---------------------------------------------------- |
+| `V` / `v`                      | Start or cancel a selection                          |
+| `j` / `k`, `Ctrl-d` / `Ctrl-u` | Stretch it a hunk / half a page                      |
+| `]` / `[`                      | Stretch it to the next file / back to a file's start |
+| `g` / `G`                      | Stretch it to the first / last hunk                  |
+| `o`                            | Jump to the other end of the selection               |
+| `1`–`9`                        | Put the whole selection in that commit               |
+| `0`, `d`, `x`                  | Take the whole selection back out                    |
+| `Esc`                          | Cancel the selection; a second `Esc` closes the list |
 
 `V G 1` puts everything from the cursor down in commit 1. Unlike `a`, a
 selection is a run in diff order, so it can span files. The digit acts like it
-does on one hunk: if the whole selection is already in that commit it comes
-back out, otherwise all of it goes in. Using the selection ends it, as in Vim.
+does on one hunk: if the whole selection is already in that commit it comes back
+out, otherwise all of it goes in. Using the selection ends it, as in Vim.
 
-There are no counts (`20j`), because the digits already name commits: `2`
-could not mean both "commit 2" and "the start of a count" without making
-every assignment wait to see what comes next. `]`, `G` and `Ctrl-d` cover the
-same ground without guessing.
+There are no counts (`20j`), because the digits already name commits: `2` could
+not mean both "commit 2" and "the start of a count" without making every
+assignment wait to see what comes next. `]`, `G` and `Ctrl-d` cover the same
+ground without guessing.
 
 The enclosing definition is worked out from the file rather than read out of the
 diff, because `jj diff --git` omits it where `git diff` includes it. It uses
-git's own language-agnostic rule, the nearest line starting in the first column
-— so in prose files it reports whatever line happens to sit above, which is
-noise rather than a signal.
+git's own language-agnostic rule, the nearest line starting in the first column.
+So in prose files it reports whatever line happens to sit above, which is noise
+rather than a signal.
 
 `Enter` hands the keys back to the form, which then describes one commit at a
 time: write the message for commit 1 and press `Ctrl-s`, and jj-compose makes

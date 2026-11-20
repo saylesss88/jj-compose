@@ -79,6 +79,48 @@ pub struct HunkEntry {
     pub rows: Range<usize>,
 }
 
+/// What to say about one line of a hunk being divided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// A context line: not a choice, so it is dimmed out of the way.
+    Context,
+    /// A `+`/`-` line, with the commit it is going to and whether the
+    /// cursor is on it.
+    Line { commit: Option<u8>, cursor: bool },
+}
+
+impl Mark {
+    const fn is_cursor(self) -> bool {
+        matches!(self, Self::Line { cursor: true, .. })
+    }
+
+    /// Style `line` to say where it is going. jj's own colors reset at each
+    /// span, so the style is patched onto every span rather than set on the
+    /// line, exactly as a search match is.
+    fn apply(self, mut line: Line<'static>) -> Line<'static> {
+        let Self::Line { commit, cursor } = self else {
+            for span in &mut line.spans {
+                span.style = span.style.patch(Style::new().add_modifier(Modifier::DIM));
+            }
+            return line;
+        };
+        let mut style = match commit {
+            Some(n) => Style::new().fg(crate::app::ui::box_color(n)),
+            // Nothing takes this line, so it reads as struck out of the plan.
+            None => Style::new()
+                .add_modifier(Modifier::DIM)
+                .add_modifier(Modifier::CROSSED_OUT),
+        };
+        if cursor {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        for span in &mut line.spans {
+            span.style = span.style.patch(style);
+        }
+        line
+    }
+}
+
 /// The diff text plus its scroll position.
 pub struct DiffView {
     rows: Vec<Line<'static>>,
@@ -359,6 +401,53 @@ impl DiffView {
             .map(|i| self.highlighted(i))
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(visible).scroll((0, self.pan)), inner);
+    }
+
+    /// Draw a hunk opened up for line-level assignment: its lines in the
+    /// order they will be committed in, each showing where it is going.
+    ///
+    /// `rows` names the patch lines to draw, in order, with what to say
+    /// about each; the caller works that out, because it is the one holding
+    /// the plan. The window follows the cursor rather than the pane's own
+    /// scroll, since the cursor is what is being moved.
+    pub fn render_divided(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        block: Block<'static>,
+        at: usize,
+        rows: &[(usize, Mark)],
+    ) {
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        self.height = usize::from(inner.height);
+        let Some(hunk) = self.hunks.get(at) else {
+            return;
+        };
+        let Some(parsed) = self
+            .patch
+            .files()
+            .get(hunk.id.file)
+            .and_then(|f| f.hunks.get(hunk.id.hunk))
+        else {
+            return;
+        };
+        // A hunk's rows are its header then its lines, one for one and in
+        // order, so a patch line's row follows from where the hunk starts.
+        let row_of = |l: usize| hunk.rows.start + 1 + l.saturating_sub(parsed.lines.start);
+
+        let height = self.height.max(1);
+        let cursor = rows.iter().position(|(_, m)| m.is_cursor()).unwrap_or(0);
+        let top = cursor
+            .saturating_sub(height / 2)
+            .min(rows.len().saturating_sub(height));
+        let lines: Vec<Line<'static>> = rows
+            .iter()
+            .skip(top)
+            .take(height)
+            .map(|&(l, mark)| mark.apply(self.rows.get(row_of(l)).cloned().unwrap_or_default()))
+            .collect();
+        frame.render_widget(Paragraph::new(lines).scroll((0, self.pan)), inner);
     }
 
     /// Put the hunk at `at` at the top of the pane.

@@ -3,7 +3,7 @@
 mod effects;
 mod focus;
 mod split;
-mod ui;
+pub(crate) mod ui;
 
 use std::io;
 
@@ -1141,6 +1141,108 @@ index 3333333..4444444 100644
         assert!(text.contains("+FIVE"), "{text}");
         assert!(!text.contains("+ONE"), "{text}");
         assert!(!text.contains("b.rs"), "{text}");
+    }
+
+    /// `e` opens a hunk up so its lines can go to different commits, which
+    /// is what lets a rename be split from a logic change beside it.
+    #[test]
+    fn e_divides_a_hunk_and_j_moves_between_its_lines() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('e'));
+        let split = app.split.as_ref().unwrap();
+        assert!(split.is_divided());
+        assert_eq!(split.line_plan(), Some([None, None].as_slice()));
+        assert_eq!(split.line_at(), 0);
+
+        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('2'));
+        let split = app.split.as_ref().unwrap();
+        assert_eq!(split.line_plan(), Some([Some(1), Some(2)].as_slice()));
+        assert_eq!(split.line_at(), 1);
+        assert_eq!(split.plan(), [None, None, None], "no hunk goes whole");
+    }
+
+    /// The point of it: the patch for a commit carries one line of the hunk
+    /// and leaves the other as context.
+    #[test]
+    fn a_divided_hunk_commits_only_the_lines_taken() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('1'));
+
+        let split = app.split.as_ref().unwrap();
+        let text = app.diff.patch().subset_with(&split.taken(1));
+        assert!(text.contains("+ONE"), "the addition is taken: {text}");
+        assert!(
+            text.contains(" one"),
+            "the removal it was grouped with is context: {text}"
+        );
+        assert!(!text.contains("-one"), "{text}");
+        assert!(!text.contains("b.rs"), "{text}");
+    }
+
+    /// Scrolling gives up `j`/`k` while a hunk is divided, since the cursor
+    /// is what those move now.
+    #[test]
+    fn a_divided_hunk_takes_over_j_and_k() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            app.split.as_ref().unwrap().line_at(),
+            1,
+            "it stops at the last line rather than scrolling on"
+        );
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.split.as_ref().unwrap().line_at(), 0);
+    }
+
+    /// `e` again closes it, and a division where the lines agree folds back
+    /// into a whole-hunk assignment.
+    #[test]
+    fn e_again_closes_a_division_that_decided_nothing_new() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('e'));
+        let split = app.split.as_ref().unwrap();
+        assert!(!split.is_divided());
+        assert_eq!(split.plan(), [Some(1), None, None], "folded back up");
+    }
+
+    /// A hunk with one change in it has nothing to divide, and says so
+    /// rather than opening an empty view.
+    #[test]
+    fn a_hunk_with_one_change_says_there_is_nothing_to_divide() {
+        const ONE_LINE: &[u8] = b"\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,0 +1,1 @@
++added
+@@ -9,1 +10,1 @@
+-x
++X
+";
+        let mut app = app("", Keymap::Default);
+        app.diff = DiffView::from_output(ONE_LINE, "").unwrap();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('e'));
+        assert!(!app.split.as_ref().unwrap().is_divided());
+        assert!(
+            matches!(&app.status, Some(Status::Info(m)) if m.contains("nothing to divide")),
+            "{:?}",
+            app.status.is_some()
+        );
     }
 
     /// Hunks go into numbered commits, and the lowest is committed first.
