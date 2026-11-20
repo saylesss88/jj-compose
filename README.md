@@ -15,6 +15,9 @@ diff.
 
 - **Strict Conventional Commits:** Draft structured messages with automatic
   validation for types, scopes, header lengths (50/72 chars), and Git trailers.
+- **Line-Level Splitting:** When one hunk holds two unrelated edits, `e`
+  divides it so each line can go to a different commit — a rename in one, the
+  logic change beside it in another.
 - **Interactive Hunk Splitting:** Press `Alt-s` to review your change hunk by
   hunk. Mark the pieces that belong together and commit them instantly—zero
   external `ui.diff-editor` configuration required.
@@ -334,6 +337,7 @@ them or take it out again right up to the split:
 | `n` / `p`, `}` / `{`, `→` / `←` | Next / previous hunk                                       |
 | `g` / `G`                       | First / last hunk                                          |
 | `a` / `d`                       | Put the rest of this file in the same commit / take it out |
+| `e`                             | Divide this hunk, to send its lines to different commits   |
 | `f`                             | Show the whole change as a list                            |
 | `V` / `v`                       | Open the list, selecting from this hunk (see below)        |
 | `Enter`                         | Done planning; go write the messages                       |
@@ -438,11 +442,59 @@ the piece you just committed.
 Putting every hunk in one box leaves nothing behind, so that is a description
 rather than a split and `Ctrl-s` behaves exactly as it does outside split mode.
 
-Hunks are the smallest unit: there is no splitting a hunk by line, and a binary
-file has no hunks at all, so its change always stays with the remainder. A
-change with only one hunk can't be split, which is also why the last box needs
-no split of its own — once everything else is committed, what is left _is_ that
-commit.
+A binary file has no hunks at all, so its change always stays with the
+remainder. The last box needs no split of its own: once everything else is
+committed, what is left _is_ that commit.
+
+### Dividing a hunk
+
+Two unrelated edits on neighbouring lines land in the same hunk, and then no
+amount of moving hunks around will separate them. `e` opens the hunk being
+looked at so each of its `+`/`-` lines can go somewhere of its own; `e` again
+closes it.
+
+| Key                            | Action                                    |
+| ------------------------------ | ----------------------------------------- |
+| `1`–`9`                        | Put this line in that commit              |
+| the same digit again, or `0`   | Take it back out                          |
+| `j` / `k`, `n` / `p`           | Next / previous line                      |
+| `e`                            | Close it; lines that agree fold back up   |
+| `Ctrl-d` / `Ctrl-u`            | Scroll a hunk taller than the pane        |
+
+The lines are shown in the order they will be written, which is not quite the
+order `jj diff` prints them in: git groups the removals and then the
+additions, and a divided hunk pairs each removal with the addition replacing
+it. A line no commit takes is struck through, so what is left behind is as
+visible as what is taken.
+
+```text
+┌ Divide wvkqrwwn · hunk 2/4 · src/app.rs · 11·· · 2/4 taken ─┐
+│ fn run() {                                                  │
+│-    let cnt = 0;                                            │
+│+    let count = 0;                                          │
+│-    if cnt > 1 {                                            │
+│+    if count >= 1 {                                         │
+│ }                                                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+In the `f` list a divided hunk is marked `*` with a count of its lines, since
+it is in no one box:
+
+```text
+│ src/app.rs  +2 -2  1 of 2 assigned              │
+│ *   1    +1   -1  impl App  2 of 4 lines        │
+```
+
+Dividing decides nothing by itself — the lines start out going wherever the
+hunk was going — and a division you open and undo leaves no trace. Lines are
+the smallest unit: there is no taking half a line.
+
+One limit worth knowing: a division spanning two boxes only survives as far as
+the next commit. Box 1's lines are committed, and the lines you put in box 2
+come back unassigned, to be decided again on the remainder. Dividing for the
+commit you are making now always works; dividing three commits ahead does not
+hold.
 
 ## Rewriting released history
 

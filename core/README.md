@@ -81,12 +81,23 @@ fn first_commits_patch() -> Result<String> {
     let diff = String::from_utf8_lossy(&jj.git_diff(&target)?).into_owned();
     let parsed = Patch::from_text(&patch::strip_ansi(&diff));
 
-    let hunks = parsed.files().iter().enumerate().flat_map(|(f, file)| {
-        (0..file.hunks.len()).map(move |h| {
-            (jj_compose_core::HunkId { file: f, hunk: h }, file.path.clone())
+    // Each hunk: where it is, which file it is in, and how many `+`/`-`
+    // lines it holds -- how many choices it offers.
+    let hunks: Vec<_> = parsed
+        .files()
+        .iter()
+        .enumerate()
+        .flat_map(|(f, file)| {
+            file.hunks.iter().enumerate().map(move |(h, hunk)| {
+                (jj_compose_core::HunkId { file: f, hunk: h }, file, hunk)
+            })
         })
-    });
-    // `None` when there are fewer than two hunks: nothing to split.
+        .map(|(id, file, hunk)| {
+            (id, file.path.clone(), parsed.changed_lines(hunk).len())
+        })
+        .collect();
+    // `None` only when one hunk holds one change: either commit would be
+    // empty. One hunk with two changes can be divided, so it is splittable.
     let Some(mut split) = Split::new(hunks) else {
         return Ok(String::new());
     };
@@ -97,9 +108,9 @@ fn first_commits_patch() -> Result<String> {
     split.next();
     split.assign_file(Some(2));
 
-    // A git-format patch of just commit 1's hunks, to apply to the tree as
-    // it was before the change.
-    Ok(parsed.subset(&split.picked(1)))
+    // A git-format patch of just what commit 1 takes, to apply to the tree
+    // as it was before the change.
+    Ok(parsed.subset_with(&split.taken(1)))
 }
 ```
 
@@ -189,9 +200,13 @@ rather than this crate guessing at presentation.
 ## What it doesn't do
 
 No rendering, no key handling, no terminal. Those live in the `jj-compose`
-binary. Hunks are also the smallest unit here: there's no splitting a hunk by
-line, and a binary file has no hunks, so its change can't be separated from the
+binary. A binary file has no hunks, so its change can't be separated from the
 rest.
+
+Lines are the smallest unit: a hunk can be divided with `Split::divide`, but
+there's no taking half a line. A division spanning several boxes survives only
+as far as the next commit — `Plan` re-finds a divided hunk's lines by their
+text, and the lines just committed are no longer there to find.
 
 ## Examples
 
