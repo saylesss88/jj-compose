@@ -91,17 +91,8 @@ impl App {
             immutable_marker(self.target.immutable),
             Span::styled(format!("· {assigned} of {hunks} assigned "), Color::Green),
         ]);
-        // A legend: every pending box in the color its rows carry, so the
-        // colors below need no remembering.
-        if !boxes.is_empty() {
-            title.push_span(Span::raw(format!(
-                "· {} {} ",
-                boxes.len(),
-                plural(boxes.len(), "commit")
-            )));
-            for n in boxes {
-                title.push_span(Span::styled(format!("{n} "), box_color(n)));
-            }
+        for span in legend(&boxes) {
+            title.push_span(span);
         }
 
         // The selection, as hunk numbers, and each row's hunk number.
@@ -460,6 +451,29 @@ pub const fn box_color(n: u8) -> Color {
     WHEEL[(n as usize).saturating_sub(1) % WHEEL.len()]
 }
 
+/// Every pending box, in the color its rows carry, so the colors in the
+/// list need no remembering.
+///
+/// Built as spans rather than drawn in place so the pairing of digit to
+/// color can be tested; a terminal's output interleaves the title with
+/// cursor moves, which makes it unreadable after the fact.
+fn legend(boxes: &[u8]) -> Vec<Span<'static>> {
+    if boxes.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![Span::raw(format!(
+        "\u{b7} {} {} ",
+        boxes.len(),
+        plural(boxes.len(), "commit")
+    ))];
+    out.extend(
+        boxes
+            .iter()
+            .map(|&n| Span::styled(format!("{n} "), box_color(n))),
+    );
+    out
+}
+
 /// The plan as one character per hunk, each in its box's color, with the
 /// hunk on screen in brackets.
 ///
@@ -547,7 +561,7 @@ pub(super) fn immutable_marker(immutable: bool) -> Span<'static> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{box_color, immutable_marker};
+    use super::{Color, box_color, immutable_marker, legend, strip_spans};
 
     /// Six colors, so a seventh box reuses the first. The digit is what
     /// distinguishes them; the color only groups.
@@ -556,6 +570,44 @@ mod tests {
         assert_eq!(box_color(1), box_color(7));
         assert_ne!(box_color(1), box_color(2));
         assert_eq!(box_color(1), ratatui::style::Color::Cyan);
+    }
+
+    /// Each box's digit in that box's own color, so the list's colors are
+    /// decoded by the title rather than by memory.
+    #[test]
+    fn the_legend_pairs_every_box_with_its_color() {
+        let spans = legend(&[1, 3]);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "\u{b7} 2 commits 1 3 ");
+        let digits: Vec<_> = spans[1..]
+            .iter()
+            .map(|s| (s.content.trim().to_owned(), s.style.fg))
+            .collect();
+        assert_eq!(
+            digits,
+            [
+                ("1".to_owned(), Some(box_color(1))),
+                ("3".to_owned(), Some(box_color(3))),
+            ],
+            "box 3 is box 3's color, not the second color in the wheel"
+        );
+        assert!(legend(&[]).is_empty(), "no boxes, no legend");
+    }
+
+    /// The strip is the same mapping, one character per hunk, with the hunk
+    /// on screen in brackets and a middle dot for one left behind.
+    #[test]
+    fn the_strip_colors_each_hunk_by_its_box() {
+        let spans = strip_spans(&[Some(1), None, Some(2)], 1);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "1[\u{b7}]2");
+        assert_eq!(spans[0].style.fg, Some(box_color(1)));
+        assert_eq!(spans[2].style.fg, Some(box_color(2)));
+        assert_eq!(
+            spans[1].style.fg,
+            Some(Color::DarkGray),
+            "a hunk no commit takes is not any box's color"
+        );
     }
 
     #[test]
