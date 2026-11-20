@@ -308,9 +308,19 @@ impl Split {
         if lines.len() != boxes.len() || boxes.iter().all(Option::is_none) {
             return;
         }
-        self.boxes[i] = None;
-        self.divided.insert(i, Lines { at: lines, boxes });
         self.planned = self.planned.max(planned);
+        let restored = Lines { at: lines, boxes };
+        // Every line headed for the same commit is that hunk going there
+        // whole, which is what it will look like next time round. Keeping it
+        // divided would mark it `*` in the list and open the line view for a
+        // decision already made.
+        if let Some(sole) = restored.sole() {
+            self.boxes[i] = Some(sole);
+            self.divided.remove(&i);
+            return;
+        }
+        self.boxes[i] = None;
+        self.divided.insert(i, restored);
     }
 
     /// The hunks in one box, whole. A divided hunk is not one of them.
@@ -469,6 +479,56 @@ impl Split {
         };
         self.assign_line(next);
     }
+
+    /// How many lines the division of the hunk being looked at has, which
+    /// is how many choices it holds.
+    #[must_use]
+    pub fn lines(&self) -> usize {
+        self.divided.get(&self.at).map_or(0, |d| d.boxes.len())
+    }
+
+    /// Move the line cursor, clamped to the division.
+    pub fn go_to_line(&mut self, line: usize) {
+        self.line = line.min(self.lines().saturating_sub(1));
+    }
+
+    pub fn first_line(&mut self) {
+        self.line = 0;
+    }
+
+    pub fn last_line(&mut self) {
+        self.line = self.lines().saturating_sub(1);
+    }
+
+    /// Assign every line between `from` and `to`, inclusive and in either
+    /// order, as a visual selection in the divided view does. Out-of-range
+    /// ends are clamped.
+    pub fn assign_line_range(&mut self, from: usize, to: usize, commit: Option<u8>) {
+        let last = self.lines().saturating_sub(1);
+        let (lo, hi) = (from.min(to).min(last), from.max(to).min(last));
+        let Some(div) = self.divided.get_mut(&self.at) else {
+            return;
+        };
+        for slot in &mut div.boxes[lo..=hi] {
+            *slot = commit;
+        }
+        if let Some(n) = commit {
+            self.planned = self.planned.max(n);
+        }
+    }
+
+    /// [`Self::toggle_range`] for lines: if every line in the selection is
+    /// already in `commit` they all come out, otherwise they all go in, so
+    /// pressing the digit twice ends where it started.
+    pub fn toggle_line_range(&mut self, from: usize, to: usize, commit: u8) {
+        let last = self.lines().saturating_sub(1);
+        let (lo, hi) = (from.min(to).min(last), from.max(to).min(last));
+        let all_in = self
+            .divided
+            .get(&self.at)
+            .is_some_and(|d| d.boxes[lo..=hi].iter().all(|b| *b == Some(commit)));
+        self.assign_line_range(lo, hi, (!all_in).then_some(commit));
+    }
 }
 
 impl Lines {
@@ -551,6 +611,64 @@ mod tests {
         assert_eq!(s.line_plan(), Some([Some(1), Some(2), None].as_slice()));
         assert_eq!(s.pending(), [1, 2], "one hunk, two commits");
         assert_eq!(s.box_of(), None, "the hunk as a whole is going nowhere");
+    }
+
+    #[test]
+    fn a_run_of_lines_goes_to_a_commit_at_once() {
+        let mut s = divided();
+        s.assign_line_range(0, 1, Some(2));
+        assert_eq!(s.line_plan(), Some([Some(2), Some(2), None].as_slice()));
+        assert_eq!(s.planned(), 2);
+    }
+
+    /// Either order, and either end out of range, still means the run
+    /// between them.
+    #[test]
+    fn a_line_range_is_the_same_both_ways_round_and_is_clamped() {
+        let mut s = divided();
+        s.assign_line_range(2, 0, Some(1));
+        assert_eq!(s.line_plan(), Some([Some(1); 3].as_slice()));
+        let mut s = divided();
+        s.assign_line_range(1, 99, Some(1));
+        assert_eq!(s.line_plan(), Some([None, Some(1), Some(1)].as_slice()));
+    }
+
+    /// A selection half in a box is made whole rather than flipped line by
+    /// line, so the digit twice always ends where it started.
+    #[test]
+    fn toggling_a_line_range_fills_it_before_emptying_it() {
+        let mut s = divided();
+        s.assign_line(Some(1));
+        s.toggle_line_range(0, 2, 1);
+        assert_eq!(
+            s.line_plan(),
+            Some([Some(1); 3].as_slice()),
+            "half in means all in"
+        );
+        s.toggle_line_range(0, 2, 1);
+        assert_eq!(s.line_plan(), Some([None; 3].as_slice()), "now all out");
+    }
+
+    #[test]
+    fn g_and_shift_g_reach_either_end_of_a_division() {
+        let mut s = divided();
+        s.last_line();
+        assert_eq!(s.line_at(), 2);
+        s.first_line();
+        assert_eq!(s.line_at(), 0);
+        s.go_to_line(99);
+        assert_eq!(s.line_at(), 2, "clamped to the last line");
+    }
+
+    /// Ranges are meaningless on a hunk that is not divided, and must not
+    /// panic or reach for the whole-hunk boxes.
+    #[test]
+    fn line_ranges_do_nothing_on_an_undivided_hunk() {
+        let mut s = split();
+        s.assign_line_range(0, 2, Some(1));
+        s.toggle_line_range(0, 2, 1);
+        assert_eq!(s.plan(), [None, None, None]);
+        assert_eq!(s.lines(), 0);
     }
 
     #[test]

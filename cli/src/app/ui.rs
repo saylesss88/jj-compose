@@ -157,7 +157,8 @@ impl App {
         let (at, total, path) = (split.at(), split.total(), split.path().to_owned());
         let plan = split.line_plan().unwrap_or_default().to_vec();
         let cursor = split.line_at();
-        let Some(rows) = self.divided_rows(at, &plan, cursor) else {
+        let selection = self.visual_line.map(|from| (from, cursor));
+        let Some(rows) = self.divided_rows(at, &plan, cursor, selection) else {
             return;
         };
 
@@ -209,6 +210,7 @@ impl App {
         at: usize,
         plan: &[Option<u8>],
         cursor: usize,
+        selection: Option<(usize, usize)>,
     ) -> Option<Vec<(usize, Mark)>> {
         let id = self.diff.hunks().get(at)?.id;
         let patch = self.diff.patch();
@@ -223,6 +225,8 @@ impl App {
                         let mark = Mark::Line {
                             commit: plan.get(nth).copied().flatten(),
                             cursor: nth == cursor,
+                            selected: selection
+                                .is_some_and(|(lo, hi)| nth >= lo.min(hi) && nth <= lo.max(hi)),
                         };
                         nth += 1;
                         (l, mark)
@@ -348,8 +352,17 @@ impl App {
             let keys = " 1-9 commit · 0 none · j/k row · V select · a/d file · Enter read it · f close · Esc leave";
             return Line::from(vec![Span::raw(keys).dark_gray()]);
         }
+        if self.choosing()
+            && self.split.as_ref().is_some_and(Split::is_divided)
+            && self.visual_line.is_some()
+        {
+            let keys =
+                " 1-9 commit selection · 0/d none · j/k g/G extend · o other end · Esc cancel";
+            return Line::from(vec![Span::raw(keys).magenta()]);
+        }
         if self.choosing() && self.split.as_ref().is_some_and(Split::is_divided) {
-            let keys = " 1-9 commit · 0 none · j/k line · e close · Enter message · Esc leave";
+            let keys =
+                " 1-9 commit · 0 none · j/k line · V select · e close · Enter message · Esc leave";
             return Line::from(vec![Span::raw(keys).dark_gray()]);
         }
         if self.choosing() {

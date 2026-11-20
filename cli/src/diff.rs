@@ -84,9 +84,13 @@ pub struct HunkEntry {
 pub enum Mark {
     /// A context line: not a choice, so it is dimmed out of the way.
     Context,
-    /// A `+`/`-` line, with the commit it is going to and whether the
-    /// cursor is on it.
-    Line { commit: Option<u8>, cursor: bool },
+    /// A `+`/`-` line: the commit it is going to, whether the cursor is on
+    /// it, and whether a visual selection covers it.
+    Line {
+        commit: Option<u8>,
+        cursor: bool,
+        selected: bool,
+    },
 }
 
 impl Mark {
@@ -98,7 +102,12 @@ impl Mark {
     /// span, so the style is patched onto every span rather than set on the
     /// line, exactly as a search match is.
     fn apply(self, mut line: Line<'static>) -> Line<'static> {
-        let Self::Line { commit, cursor } = self else {
+        let Self::Line {
+            commit,
+            cursor,
+            selected,
+        } = self
+        else {
             for span in &mut line.spans {
                 span.style = span.style.patch(Style::new().add_modifier(Modifier::DIM));
             }
@@ -112,6 +121,12 @@ impl Mark {
             },
             |n| Style::new().fg(crate::app::ui::box_color(n)),
         );
+        // A selection is a background, so the cursor's reverse still reads
+        // against it. Unlike the hunk list, the range is shown rather than
+        // only announced in the status bar.
+        if selected {
+            style = style.bg(Color::Indexed(238));
+        }
         if cursor {
             style = style.add_modifier(Modifier::REVERSED);
         }

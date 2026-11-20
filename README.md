@@ -458,8 +458,10 @@ closes it.
 | `1`–`9`                      | Put this line in that commit            |
 | the same digit again, or `0` | Take it back out                        |
 | `j` / `k`, `n` / `p`         | Next / previous line                    |
+| `g` / `G`                    | First / last line                       |
+| `v` / `V`                    | Select a run of lines (see below)       |
 | `e`                          | Close it; lines that agree fold back up |
-| `Ctrl-d` / `Ctrl-u`          | Scroll a hunk taller than the pane      |
+| `Ctrl-d` / `Ctrl-u`          | Move the cursor half a page             |
 
 The lines are shown in the order they will be written, which is not quite the
 order `jj diff` prints them in: git groups the removals and then the additions,
@@ -486,9 +488,34 @@ is in no one box:
 │ *   1    +1   -1  impl App  2 of 4 lines        │
 ```
 
-Dividing decides nothing by itself, the lines start out going wherever the hunk
-was going, and a division you open and undo leaves no trace. Lines are the
-smallest unit: there is no taking half a line.
+**The lines start out going wherever the hunk was going**, which is the quick
+way to carve one line out of an otherwise coherent hunk: press `1` to put the
+whole hunk in commit 1, *then* `e`, and every line is already in commit 1 — now
+`0` on the one line that doesn't belong. Dividing decides nothing by itself, and
+a division you open and undo leaves no trace.
+
+Lines are the smallest unit: there is no taking half a line. A `-` and the `+`
+replacing it are two separate choices, so taking the `+` without the `-` leaves
+both lines in the file — the untaken one isn't struck through, which is how you
+see it.
+
+#### Selecting a run of lines
+
+Changes come in pairs, so most decisions cover two adjacent lines. `v` (or `V`)
+starts a selection at the cursor, moving stretches it, and a digit puts the
+whole run in that commit:
+
+| Keys    | Effect                                               |
+| ------- | ---------------------------------------------------- |
+| `v j 1` | This line and the next to commit 1 — a renamed pair  |
+| `V G 2` | From here to the end of the hunk, to commit 2        |
+| `v ... 0`, `d`, `x` | Take the whole selection back out        |
+| `o`     | Jump to the other end of the selection               |
+| `Esc`   | Drop the selection; again to leave split mode        |
+
+A digit ends the selection once it has been used, as in Vim. A selection half
+in a box is made whole rather than flipped line by line, so pressing the same
+digit twice always ends where it started.
 
 A division is not limited to two commits: the lines of one hunk can go to as
 many boxes as you like, and the plan survives each commit the same way a

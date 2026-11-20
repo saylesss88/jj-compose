@@ -204,7 +204,9 @@ binary. A binary file has no hunks, so its change can't be separated from the
 rest.
 
 Lines are the smallest unit: a hunk can be divided with `Split::divide`, but
-there's no taking half a line.
+there's no taking half a line. `assign_line` and `toggle_line` decide the line
+under the cursor; `assign_line_range` and `toggle_line_range` decide a run of
+them, which is what the TUI's visual selection drives.
 
 A division can span any number of boxes and survives each split: `Plan` records
 a divided hunk's lines by their own text, and matches them against what's left

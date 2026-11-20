@@ -224,6 +224,98 @@ diff --git a/a.rs b/a.rs
 
     /// A hunk divided across two commits: after commit 1 is made, the
     /// hunk's content has changed, so only its lines can find it again.
+    /// A one-hunk change, splittable because the hunk holds several changes.
+    fn split_of_one(patch: &Patch) -> Split {
+        Split::new(patch.ids().into_iter().map(|id| {
+            let file = &patch.files()[id.file];
+            let changes = patch.changed_lines(&file.hunks[id.hunk]).len();
+            (id, file.path.clone(), changes)
+        }))
+        .expect("divisible")
+    }
+
+    /// A division is not limited to two commits, nor to one split. Three
+    /// boxes in one hunk, committed one after another: boxes 2 and 3 are
+    /// both re-found after commit 1, and box 3 again after commit 2.
+    #[test]
+    fn a_division_can_span_every_box_and_outlive_several_splits() {
+        const R0: &str = "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,7 +1,7 @@
+ head
+-aaa
++AAA
+-bbb
++BBB
+-ccc
++CCC
+ tail
+";
+        // After commit 1: aaa is renamed, bbb and ccc are not.
+        let r1 = "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,7 +1,7 @@
+ head
+ AAA
+-bbb
++BBB
+-ccc
++CCC
+ tail
+";
+        let r2 = "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,7 +1,7 @@
+ head
+ AAA
+ BBB
+-ccc
++CCC
+ tail
+";
+        let p0 = Patch::from_text(R0);
+        let mut s0 = split_of_one(&p0);
+        let h = &p0.files()[0].hunks[0];
+        s0.divide(p0.changed_lines(h));
+        // Paired order: -aaa +AAA -bbb +BBB -ccc +CCC.
+        for commit in [1u8, 1, 2, 2, 3, 3] {
+            s0.assign_line(Some(commit));
+            s0.next_line();
+        }
+        assert_eq!(s0.pending(), [1, 2, 3]);
+        let plan0 = Plan::capture(&p0, &s0);
+
+        let p1 = Patch::from_text(r1);
+        let mut s1 = split_of_one(&p1);
+        plan0.apply(&p1, &mut s1);
+        s1.first();
+        assert_eq!(
+            s1.line_plan(),
+            Some([Some(2), Some(2), Some(3), Some(3)].as_slice()),
+            "boxes 2 and 3 both survived the first split"
+        );
+        assert_eq!(s1.next_box(), Some(2));
+        assert_eq!(s1.planned(), 3);
+
+        let plan1 = Plan::capture(&p1, &s1);
+        let p2 = Patch::from_text(r2);
+        let mut s2 = split_of_one(&p2);
+        plan1.apply(&p2, &mut s2);
+        s2.first();
+        assert_eq!(s2.next_box(), Some(3), "box 3 survived two splits");
+        assert_eq!(s2.box_of(), Some(3));
+        assert!(
+            !s2.is_divided(),
+            "all that is left agrees, so it is the hunk going whole"
+        );
+    }
+
     #[test]
     fn a_division_survives_its_hunk_being_part_committed() {
         const DIVIDED: &str = "\
@@ -280,12 +372,13 @@ diff --git a/a.rs b/a.rs
         plan.apply(&rest, &mut next);
 
         next.first();
-        assert!(next.is_divided(), "the division was found again");
         assert_eq!(
-            next.line_plan(),
-            Some([Some(2), Some(2)].as_slice()),
-            "the lines commit 1 took are gone; commit 2's are still here"
+            next.box_of(),
+            Some(2),
+            "the lines commit 1 took are gone; commit 2's were found again, \
+             and agreeing on one box makes it the hunk going whole"
         );
+        assert!(!next.is_divided(), "nothing left to decide line by line");
         next.last();
         assert_eq!(next.box_of(), Some(3), "the whole hunk too");
         assert_eq!(next.next_box(), Some(2));
@@ -340,8 +433,8 @@ diff --git a/a.rs b/a.rs
 
         next.first();
         assert_eq!(
-            next.line_plan(),
-            Some([Some(2)].as_slice()),
+            next.box_of(),
+            Some(2),
             "the surviving `+}}` is commit 2's, not commit 1's"
         );
     }

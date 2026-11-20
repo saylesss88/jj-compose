@@ -135,6 +135,13 @@ pub struct App {
     /// (see [`Split::at`]). The selection runs from here to the cursor.
     /// `None` when not selecting, and always `None` with the list closed.
     pub(super) visual: Option<usize>,
+    /// Where a visual selection in the divided view started, as a line
+    /// index within the hunk's division.
+    ///
+    /// Kept apart from `visual` on purpose: the two count different things,
+    /// and one field would let a selection left behind in one view be read
+    /// as an index into the other.
+    pub(super) visual_line: Option<usize>,
     /// The definition each hunk sits in, parallel to the diff's hunks.
     /// Empty until [`Request::Symbols`] has been carried out.
     pub(super) symbols: Vec<Option<String>>,
@@ -193,6 +200,7 @@ impl App {
             split: None,
             overview: None,
             visual: None,
+            visual_line: None,
             symbols: Vec::new(),
             plan: Plan::default(),
             at_risk: session.at_risk,
@@ -1235,6 +1243,91 @@ index 3333333..4444444 100644
         );
         assert!(!text.contains("-one"), "{text}");
         assert!(!text.contains("b.rs"), "{text}");
+    }
+
+    /// `v j 1`: the common gesture, a `-`/`+` pair to one commit in one go.
+    #[test]
+    fn a_selection_of_lines_is_assigned_with_one_digit() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('v'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!(
+            app.split.as_ref().unwrap().line_plan(),
+            Some([Some(1), Some(1)].as_slice())
+        );
+        assert!(
+            app.visual_line.is_none(),
+            "assigning ends the selection, as in Vim"
+        );
+        assert!(
+            app.split.as_ref().unwrap().is_divided(),
+            "but the hunk stays open"
+        );
+    }
+
+    /// `V G 1` takes the rest of the hunk from the cursor down.
+    #[test]
+    fn a_line_selection_stretches_to_the_end_of_the_division() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('V'));
+        press(&mut app, KeyCode::Char('G'));
+        press(&mut app, KeyCode::Char('2'));
+        assert_eq!(
+            app.split.as_ref().unwrap().line_plan(),
+            Some([Some(2), Some(2)].as_slice())
+        );
+    }
+
+    /// `Esc` drops the selection before it leaves split mode, so one key
+    /// does not do both.
+    #[test]
+    fn esc_cancels_a_line_selection_before_it_cancels_the_split() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('v'));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.visual_line.is_none());
+        assert!(app.split.is_some(), "still splitting");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.split.is_none(), "now it leaves");
+    }
+
+    /// The two selections count different things, so a line selection must
+    /// not outlive the division it was made in.
+    #[test]
+    fn a_line_selection_does_not_outlive_its_division() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('v'));
+        press(&mut app, KeyCode::Char('e'));
+        assert!(app.visual_line.is_none(), "closing it drops the selection");
+        assert!(!app.split.as_ref().unwrap().is_divided());
+    }
+
+    /// `o` swaps which end of the selection the cursor is on.
+    #[test]
+    fn o_jumps_to_the_other_end_of_a_line_selection() {
+        let mut app = splitting_app();
+        alt(&mut app, 's');
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('v'));
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.split.as_ref().unwrap().line_at(), 0);
+        press(&mut app, KeyCode::Char('o'));
+        assert_eq!(
+            app.split.as_ref().unwrap().line_at(),
+            1,
+            "back to the anchor"
+        );
+        assert_eq!(app.visual_line, Some(0), "and the anchor is where we were");
     }
 
     /// Scrolling gives up `j`/`k` while a hunk is divided, since the cursor

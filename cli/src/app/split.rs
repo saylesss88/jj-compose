@@ -161,6 +161,7 @@ impl App {
                 let at = self.split.as_ref()?.at();
                 let lines = self.hunk_lines(at);
                 let count = lines.len();
+                self.visual_line = None;
                 self.split.as_mut()?.divide(lines);
                 if self.split.as_ref().is_some_and(Split::is_divided) {
                     self.diff.show_hunk(at);
@@ -255,9 +256,11 @@ impl App {
     /// between the hunk's own lines, so the pane no longer scrolls, and
     /// `Ctrl-d`/`Ctrl-u` are what a hunk taller than the pane is read with.
     fn divided_key(&mut self, code: KeyCode, ctrl: bool) -> Option<Exit> {
+        let half = self.diff.half_page();
         match code {
             // Close it. Lines that all agree fold back into the hunk.
             KeyCode::Char('e') => {
+                self.visual_line = None;
                 self.split.as_mut()?.undivide();
                 if self.split.as_ref().is_some_and(Split::is_divided) {
                     self.status = Some(Status::Info(
@@ -266,22 +269,82 @@ impl App {
                     ));
                 }
             }
-            KeyCode::Char('d') if ctrl => self.diff.scroll_down(self.diff.half_page()),
-            KeyCode::Char('u') if ctrl => self.diff.scroll_up(self.diff.half_page()),
+
+            // Selecting a run of lines. A `-`/`+` pair is the common one:
+            // `v j 1` sends a rename to commit 1 in one gesture.
+            KeyCode::Char('v' | 'V') => {
+                let at = self.split.as_ref()?.line_at();
+                self.visual_line = if self.visual_line.is_some() {
+                    None
+                } else {
+                    Some(at)
+                };
+            }
+            // Vim's `o`: jump to the other end of the selection.
+            KeyCode::Char('o') if self.visual_line.is_some() => {
+                let at = self.split.as_ref()?.line_at();
+                let other = self.visual_line.replace(at)?;
+                self.split.as_mut()?.go_to_line(other);
+            }
+
+            // Motions. A selection stretches as the cursor moves, so these
+            // need no special case.
+            KeyCode::Char('d') if ctrl => {
+                let to = self.split.as_ref()?.line_at() + half;
+                self.split.as_mut()?.go_to_line(to);
+            }
+            KeyCode::Char('u') if ctrl => {
+                let to = self.split.as_ref()?.line_at().saturating_sub(half);
+                self.split.as_mut()?.go_to_line(to);
+            }
             KeyCode::Char('j' | 'n') | KeyCode::Down => self.split.as_mut()?.next_line(),
             KeyCode::Char('k' | 'p') | KeyCode::Up => self.split.as_mut()?.prev_line(),
-            KeyCode::Char(c @ '1'..='9') => self.split.as_mut()?.toggle_line(digit(c)),
-            KeyCode::Char(' ') => self.split.as_mut()?.toggle_line(1),
-            KeyCode::Char('0') => self.split.as_mut()?.assign_line(None),
+            KeyCode::Char('g') | KeyCode::Home => self.split.as_mut()?.first_line(),
+            KeyCode::Char('G') | KeyCode::End => self.split.as_mut()?.last_line(),
+
+            // Assigning, to the line or to the whole selection. Either way
+            // the selection ends once it has been used, as in Vim.
+            KeyCode::Char(c @ ('1'..='9' | ' ')) => {
+                let commit = if c == ' ' { 1 } else { digit(c) };
+                let at = self.split.as_ref()?.line_at();
+                let split = self.split.as_mut()?;
+                match self.visual_line.take() {
+                    Some(from) => split.toggle_line_range(from, at, commit),
+                    None => split.toggle_line(commit),
+                }
+            }
+            KeyCode::Char('0') => {
+                let at = self.split.as_ref()?.line_at();
+                let split = self.split.as_mut()?;
+                match self.visual_line.take() {
+                    Some(from) => split.assign_line_range(from, at, None),
+                    None => split.assign_line(None),
+                }
+            }
+            // `d`/`x` on a selection take it out, as Vim's would delete it.
+            KeyCode::Char('d' | 'x') if self.visual_line.is_some() => {
+                let at = self.split.as_ref()?.line_at();
+                let from = self.visual_line.take()?;
+                self.split.as_mut()?.assign_line_range(from, at, None);
+            }
             // As in the hunk view: not final, just quicker.
             KeyCode::Char('y') => {
+                self.visual_line = None;
                 let split = self.split.as_mut()?;
                 split.assign_line(Some(1));
                 split.next_line();
             }
-            // Leaving split mode entirely still works from in here.
-            KeyCode::Esc | KeyCode::Char('q') => self.cancel_split(),
-            KeyCode::Enter => self.write_message(),
+
+            // `Esc` drops the selection first, and only then leaves.
+            KeyCode::Esc if self.visual_line.is_some() => self.visual_line = None,
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.visual_line = None;
+                self.cancel_split();
+            }
+            KeyCode::Enter => {
+                self.visual_line = None;
+                self.write_message();
+            }
             _ => {}
         }
         None
@@ -299,6 +362,7 @@ impl App {
     }
 
     fn cancel_split(&mut self) {
+        self.visual_line = None;
         self.split = None;
         self.zoomed = false;
         self.focus = Focus::Editor;
