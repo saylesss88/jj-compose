@@ -26,7 +26,7 @@ fn main() -> Result<()> {
     }
 
     // Nothing is planned yet, so every hunk is loose.
-    let plan = vec![None; parsed.ids().len()];
+    let plan = vec![overview::Where::Nowhere; parsed.ids().len()];
     let symbols = symbols::for_patch(&jj, &target, &parsed)?;
 
     println!("{}", target.change_id);

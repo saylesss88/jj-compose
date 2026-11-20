@@ -5,12 +5,14 @@
 //! this same binary, called back with `--apply-hunks <patch> <left> <right>`.
 //! `main` checks for that first, before doing anything else.
 //!
-//! **This rewrites history.** Run it in a throwaway repo:
+//! **Warning! This rewrites history.** Run it in a throwaway repo:
 //!
 //! ```sh
+//! # Run from the jj-compose repo root:
+//! REPO=$(pwd)
 //! jj git init /tmp/demo && cd /tmp/demo
 //! printf 'a\n' > one.txt && printf 'b\n' > two.txt
-//! cargo run --manifest-path /path/to/jj-compose/Cargo.toml \
+//! cargo run --manifest-path "$REPO/Cargo.toml" \
 //!     -p jj_compose_core --example split_first -- "feat: add one.txt"
 //! jj log
 //! ```
@@ -43,12 +45,13 @@ fn main() -> Result<()> {
     let parsed = Patch::from_text(&patch::strip_ansi(&diff));
 
     let hunks = parsed.ids().into_iter().map(|id| {
-        let path = parsed.files()[id.file].path.clone();
-        (id, path)
+        let file = &parsed.files()[id.file];
+        let changes = parsed.changed_lines(&file.hunks[id.hunk]).len();
+        (id, file.path.clone(), changes)
     });
     let Some(mut plan) = Split::new(hunks) else {
         return Err(Error::UnexpectedOutput(
-            "need at least two hunks to split".into(),
+            "nothing to split: one hunk with one change in it".into(),
         ));
     };
 
