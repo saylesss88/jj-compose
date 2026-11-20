@@ -9,7 +9,9 @@
 //! are committed lowest first — so the numbering is also the order the
 //! commits will end up in.
 
-use crate::HunkId;
+use std::collections::BTreeMap;
+
+use crate::{HunkId, Take};
 
 /// The hunks of a change, which one is being looked at, and which commit
 /// each is destined for.
@@ -27,6 +29,22 @@ pub struct Split {
     /// The highest box number ever used, so "commit 2 of 3" can still say
     /// "of 3" once commit 1 has been made.
     planned: u8,
+    /// Hunks opened up so their lines can go to different commits, keyed by
+    /// position in `ids`. Sparse on purpose: a hunk not in here is decided
+    /// whole, which is nearly all of them.
+    divided: BTreeMap<usize, Lines>,
+    /// The line being looked at inside a divided hunk.
+    line: usize,
+}
+
+/// One hunk's `+`/`-` lines and where each is going.
+#[derive(Debug, Clone)]
+struct Lines {
+    /// The lines themselves, as indices into the patch, in the order
+    /// [`crate::Patch::changed_lines`] gives them.
+    at: Vec<usize>,
+    /// Which commit each is destined for, parallel to `at`.
+    boxes: Vec<Option<u8>>,
 }
 
 impl Split {
@@ -42,6 +60,8 @@ impl Split {
             paths,
             at: 0,
             planned: 0,
+            divided: BTreeMap::new(),
+            line: 0,
         })
     }
 
@@ -75,10 +95,14 @@ impl Split {
         &self.boxes
     }
 
-    /// The commit the hunk being looked at is destined for.
+    /// The commit the hunk being looked at is destined for, or `None` if it
+    /// stays behind. A divided hunk has one only if every line agrees.
     #[must_use]
     pub fn box_of(&self) -> Option<u8> {
-        self.boxes.get(self.at).copied().flatten()
+        match self.divided.get(&self.at) {
+            Some(div) => div.sole(),
+            None => self.boxes.get(self.at).copied().flatten(),
+        }
     }
 
     /// How many boxes were ever planned, which outlives committing them.
@@ -90,7 +114,13 @@ impl Split {
     /// The boxes that still hold hunks, lowest first.
     #[must_use]
     pub fn pending(&self) -> Vec<u8> {
-        let mut used: Vec<u8> = self.boxes.iter().flatten().copied().collect();
+        let mut used: Vec<u8> = (0..self.ids.len())
+            .flat_map(|i| match self.divided.get(&i) {
+                Some(div) => div.boxes.clone(),
+                None => vec![self.boxes[i]],
+            })
+            .flatten()
+            .collect();
         used.sort_unstable();
         used.dedup();
         used
@@ -190,6 +220,8 @@ impl Split {
     }
 
     fn set(&mut self, i: usize, commit: Option<u8>) {
+        // Deciding the hunk as a whole discards how its lines were divided.
+        self.divided.remove(&i);
         if let Some(slot) = self.boxes.get_mut(i) {
             *slot = commit;
         }
@@ -207,7 +239,24 @@ impl Split {
         self.planned = self.planned.max(planned);
     }
 
-    /// The hunks in one box, for [`crate::Patch::subset`].
+    /// What one box holds, for [`crate::Patch::subset_with`]: whole hunks,
+    /// and the chosen lines of any hunk that was divided.
+    #[must_use]
+    pub fn taken(&self, commit: u8) -> Vec<(HunkId, Take)> {
+        self.ids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &id)| match self.divided.get(&i) {
+                Some(div) => {
+                    let lines = div.in_box(commit);
+                    (!lines.is_empty()).then_some((id, Take::Lines(lines)))
+                }
+                None => (self.boxes[i] == Some(commit)).then_some((id, Take::Whole)),
+            })
+            .collect()
+    }
+
+    /// The hunks in one box, whole. A divided hunk is not one of them.
     #[must_use]
     pub fn picked(&self, commit: u8) -> Vec<HunkId> {
         self.ids
@@ -218,26 +267,165 @@ impl Split {
             .collect()
     }
 
-    /// How many hunks are in one box.
+    /// How many hunks put something in one box. A divided hunk counts once
+    /// however many of its lines are in there.
     #[must_use]
     pub fn count(&self, commit: u8) -> usize {
-        self.boxes
-            .iter()
-            .filter(|slot| **slot == Some(commit))
+        (0..self.ids.len())
+            .filter(|i| match self.divided.get(i) {
+                Some(div) => !div.in_box(commit).is_empty(),
+                None => self.boxes[*i] == Some(commit),
+            })
             .count()
     }
 
-    /// How many hunks are in any box at all.
+    /// How many hunks put something in any box at all.
     #[must_use]
     pub fn assigned(&self) -> usize {
-        self.boxes.iter().flatten().count()
+        (0..self.ids.len())
+            .filter(|i| match self.divided.get(i) {
+                Some(div) => div.boxes.iter().any(Option::is_some),
+                None => self.boxes[*i].is_some(),
+            })
+            .count()
     }
 
-    /// Whether every hunk is in the same single box, which is a description
-    /// rather than a split: nothing would be left behind.
+    /// Whether the whole change is in one box, which is a description rather
+    /// than a split: nothing would be left behind. A divided hunk with a
+    /// line left out means something is, so this is false.
     #[must_use]
     pub fn is_everything(&self) -> bool {
-        self.pending().len() == 1 && self.assigned() == self.ids.len()
+        self.pending().len() == 1
+            && (0..self.ids.len()).all(|i| match self.divided.get(&i) {
+                Some(div) => div.boxes.iter().all(Option::is_some),
+                None => self.boxes[i].is_some(),
+            })
+    }
+
+    // --- Dividing a hunk by line ---------------------------------------
+    //
+    // A hunk is the unit of a split, but one hunk can hold two unrelated
+    // edits on neighbouring lines. Dividing opens the hunk up so each of
+    // its `+`/`-` lines can be decided on its own; everything above goes on
+    // treating the hunk as one thing, because nearly every hunk is.
+
+    /// Open the hunk being looked at, with `lines` from
+    /// [`crate::Patch::changed_lines`]. Its lines start where the hunk as a
+    /// whole was going, so dividing an assigned hunk decides nothing by
+    /// itself.
+    ///
+    /// A hunk with fewer than two choices in it cannot be divided.
+    pub fn divide(&mut self, lines: Vec<usize>) {
+        if lines.len() < 2 || self.divided.contains_key(&self.at) {
+            return;
+        }
+        let was = self.boxes.get(self.at).copied().flatten();
+        self.boxes[self.at] = None;
+        self.divided.insert(
+            self.at,
+            Lines {
+                boxes: vec![was; lines.len()],
+                at: lines,
+            },
+        );
+        self.line = 0;
+    }
+
+    /// Close the hunk being looked at. Lines that all agree fold back into
+    /// a whole-hunk assignment, so a division the user undid leaves no
+    /// trace.
+    pub fn undivide(&mut self) {
+        let Some(div) = self.divided.remove(&self.at) else {
+            return;
+        };
+        let sole = div.sole();
+        if sole.is_some() || div.boxes.iter().all(Option::is_none) {
+            self.boxes[self.at] = sole;
+        } else {
+            // A real division being closed: keep it rather than lose it.
+            self.divided.insert(self.at, div);
+        }
+    }
+
+    /// Whether the hunk being looked at is open for line-level assignment.
+    #[must_use]
+    pub fn is_divided(&self) -> bool {
+        self.divided.contains_key(&self.at)
+    }
+
+    /// Where each line of the hunk being looked at is going, parallel to
+    /// the lines it was divided with. `None` if it is not divided.
+    #[must_use]
+    pub fn line_plan(&self) -> Option<&[Option<u8>]> {
+        self.divided.get(&self.at).map(|d| d.boxes.as_slice())
+    }
+
+    /// The line being looked at inside a divided hunk, counted from zero.
+    #[must_use]
+    pub const fn line_at(&self) -> usize {
+        self.line
+    }
+
+    /// The commit that line is destined for.
+    #[must_use]
+    pub fn box_of_line(&self) -> Option<u8> {
+        self.divided
+            .get(&self.at)
+            .and_then(|d| d.boxes.get(self.line).copied().flatten())
+    }
+
+    pub fn next_line(&mut self) {
+        if let Some(div) = self.divided.get(&self.at) {
+            self.line = (self.line + 1).min(div.boxes.len().saturating_sub(1));
+        }
+    }
+
+    pub const fn prev_line(&mut self) {
+        self.line = self.line.saturating_sub(1);
+    }
+
+    /// Put the line being looked at in a box, or take it out with `None`.
+    pub fn assign_line(&mut self, commit: Option<u8>) {
+        let line = self.line;
+        if let Some(div) = self.divided.get_mut(&self.at)
+            && let Some(slot) = div.boxes.get_mut(line)
+        {
+            *slot = commit;
+        }
+        if let Some(n) = commit {
+            self.planned = self.planned.max(n);
+        }
+    }
+
+    /// [`Self::toggle`] for one line.
+    pub fn toggle_line(&mut self, commit: u8) {
+        let next = if self.box_of_line() == Some(commit) {
+            None
+        } else {
+            Some(commit)
+        };
+        self.assign_line(next);
+    }
+}
+
+impl Lines {
+    /// The one box every line is in, if they all agree on a box.
+    fn sole(&self) -> Option<u8> {
+        let first = self.boxes.first().copied().flatten()?;
+        self.boxes
+            .iter()
+            .all(|b| *b == Some(first))
+            .then_some(first)
+    }
+
+    /// The lines in one box, as patch line indices.
+    fn in_box(&self, commit: u8) -> Vec<usize> {
+        self.at
+            .iter()
+            .zip(&self.boxes)
+            .filter(|(_, b)| **b == Some(commit))
+            .map(|(&l, _)| l)
+            .collect()
     }
 }
 
@@ -253,6 +441,178 @@ mod tests {
             (HunkId { file: 1, hunk: 0 }, "b.rs".to_owned()),
         ])
         .expect("three hunks can be split")
+    }
+
+    /// Patch line indices; what they point at doesn't matter here.
+    fn divided() -> Split {
+        let mut s = split();
+        s.divide(vec![4, 5, 6]);
+        s
+    }
+
+    #[test]
+    fn dividing_a_hunk_decides_nothing_by_itself() {
+        let s = divided();
+        assert!(s.is_divided());
+        assert_eq!(s.line_plan(), Some([None, None, None].as_slice()));
+        assert_eq!(s.assigned(), 0, "no line is in a box yet");
+        assert_eq!(s.box_of(), None);
+    }
+
+    /// The lines inherit the hunk's box, so opening an assigned hunk to move
+    /// one line out of it doesn't lose the other lines' decision.
+    #[test]
+    fn a_divided_hunk_keeps_where_it_was_going() {
+        let mut s = split();
+        s.assign(Some(2));
+        s.divide(vec![4, 5, 6]);
+        assert_eq!(s.line_plan(), Some([Some(2); 3].as_slice()));
+        assert_eq!(s.box_of(), Some(2), "it is still all going to 2");
+    }
+
+    #[test]
+    fn a_hunk_with_one_choice_in_it_cannot_be_divided() {
+        let mut s = split();
+        s.divide(vec![4]);
+        assert!(!s.is_divided());
+    }
+
+    #[test]
+    fn lines_go_to_boxes_one_at_a_time() {
+        let mut s = divided();
+        s.assign_line(Some(1));
+        s.next_line();
+        s.assign_line(Some(2));
+        assert_eq!(s.line_plan(), Some([Some(1), Some(2), None].as_slice()));
+        assert_eq!(s.pending(), [1, 2], "one hunk, two commits");
+        assert_eq!(s.box_of(), None, "the hunk as a whole is going nowhere");
+    }
+
+    #[test]
+    fn the_same_digit_takes_a_line_back_out() {
+        let mut s = divided();
+        s.toggle_line(1);
+        assert_eq!(s.box_of_line(), Some(1));
+        s.toggle_line(1);
+        assert_eq!(s.box_of_line(), None);
+    }
+
+    #[test]
+    fn the_line_cursor_stops_at_either_end() {
+        let mut s = divided();
+        s.prev_line();
+        assert_eq!(s.line_at(), 0);
+        for _ in 0..9 {
+            s.next_line();
+        }
+        assert_eq!(s.line_at(), 2);
+    }
+
+    /// Only the chosen lines travel, and the other hunks still go whole.
+    #[test]
+    fn a_box_holds_whole_hunks_and_parts_of_divided_ones() {
+        let mut s = divided();
+        s.assign_line(Some(1));
+        s.next_line();
+        s.next_line();
+        s.assign_line(Some(1));
+        s.last();
+        s.assign(Some(1));
+
+        let taken = s.taken(1);
+        assert_eq!(
+            taken,
+            [
+                (HunkId { file: 0, hunk: 0 }, Take::Lines(vec![4, 6])),
+                (HunkId { file: 1, hunk: 0 }, Take::Whole),
+            ]
+        );
+        assert_eq!(s.count(1), 2, "a divided hunk counts once");
+    }
+
+    #[test]
+    fn a_divided_hunk_puts_nothing_in_a_box_it_has_no_line_in() {
+        let mut s = divided();
+        s.assign_line(Some(1));
+        assert!(s.taken(2).is_empty());
+    }
+
+    /// `picked` is the whole-hunk view, and a divided hunk is not whole.
+    #[test]
+    fn picked_leaves_divided_hunks_out() {
+        let mut s = divided();
+        s.assign_line(Some(1));
+        assert!(s.picked(1).is_empty());
+        assert_eq!(s.taken(1).len(), 1);
+    }
+
+    /// The shortcut that treats one box holding everything as a description
+    /// must not fire while a line is still unspoken for.
+    #[test]
+    fn a_line_left_out_means_it_is_not_the_whole_change() {
+        let mut s = divided();
+        s.assign_all(Some(1));
+        assert!(s.is_everything(), "assigning all undoes the division");
+
+        let mut s = divided();
+        s.first();
+        s.assign_line(Some(1));
+        s.last();
+        s.assign(Some(1));
+        s.prev();
+        s.assign(Some(1));
+        assert_eq!(s.pending(), [1]);
+        assert!(
+            !s.is_everything(),
+            "two lines of the divided hunk stay behind"
+        );
+    }
+
+    #[test]
+    fn deciding_the_hunk_as_a_whole_discards_the_division() {
+        let mut s = divided();
+        s.assign_line(Some(1));
+        s.assign(Some(3));
+        assert!(!s.is_divided());
+        assert_eq!(s.taken(3), [(HunkId { file: 0, hunk: 0 }, Take::Whole)]);
+    }
+
+    /// Closing a division where every line agrees leaves no trace of it.
+    #[test]
+    fn a_division_the_user_undid_folds_back_up() {
+        let mut s = divided();
+        s.assign_line(Some(1));
+        s.next_line();
+        s.assign_line(Some(1));
+        s.next_line();
+        s.assign_line(Some(1));
+        s.undivide();
+        assert!(!s.is_divided());
+        assert_eq!(s.box_of(), Some(1));
+
+        let mut s = divided();
+        s.undivide();
+        assert!(!s.is_divided(), "nothing assigned folds up too");
+        assert_eq!(s.box_of(), None);
+    }
+
+    /// But a real division is not thrown away by closing the view.
+    #[test]
+    fn closing_a_real_division_keeps_it() {
+        let mut s = divided();
+        s.assign_line(Some(1));
+        s.undivide();
+        assert!(
+            s.is_divided(),
+            "lines disagree, so it still means something"
+        );
+    }
+
+    #[test]
+    fn dividing_remembers_the_highest_box_for_commit_n_of_m() {
+        let mut s = divided();
+        s.assign_line(Some(3));
+        assert_eq!(s.planned(), 3);
     }
 
     #[test]
