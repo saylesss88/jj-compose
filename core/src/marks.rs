@@ -21,6 +21,9 @@ pub struct Split {
     ids: Vec<HunkId>,
     /// The file each hunk belongs to, for assigning a whole file at once.
     paths: Vec<String>,
+    /// How many `+`/`-` lines each hunk has, parallel to `ids`: how many
+    /// choices it holds, and so whether it can be divided at all.
+    changes: Vec<usize>,
     /// The hunk being looked at.
     at: usize,
     /// Which commit each hunk is destined for, parallel to `ids`. `None`
@@ -48,21 +51,40 @@ struct Lines {
 }
 
 impl Split {
-    /// Every hunk of the change, as its id and the path of the file it is in.
+    /// Every hunk of the change: its id, the path of the file it is in, and
+    /// how many `+`/`-` lines it has (see [`crate::Patch::changed_lines`]).
     ///
-    /// `None` when there is nothing to split: with a single hunk, one of the
-    /// two commits would come out empty whichever way it went.
-    pub fn new(hunks: impl IntoIterator<Item = (HunkId, String)>) -> Option<Self> {
-        let (ids, paths): (Vec<_>, Vec<_>) = hunks.into_iter().unzip();
-        (ids.len() > 1).then(|| Self {
+    /// `None` when there is nothing to split, which means one hunk holding
+    /// one change: either commit would come out empty whichever way it
+    /// went. A single hunk with two changes in it can be divided, so it is
+    /// splittable.
+    pub fn new(hunks: impl IntoIterator<Item = (HunkId, String, usize)>) -> Option<Self> {
+        let mut ids = Vec::new();
+        let mut paths = Vec::new();
+        let mut changes = Vec::new();
+        for (id, path, n) in hunks {
+            ids.push(id);
+            paths.push(path);
+            changes.push(n);
+        }
+        let divisible = changes.first().is_some_and(|&n| n > 1);
+        (ids.len() > 1 || (ids.len() == 1 && divisible)).then(|| Self {
             boxes: vec![None; ids.len()],
             ids,
             paths,
+            changes,
             at: 0,
             planned: 0,
             divided: BTreeMap::new(),
             line: 0,
         })
+    }
+
+    /// How many `+`/`-` lines the hunk being looked at has: how many
+    /// choices dividing it would offer.
+    #[must_use]
+    pub fn changes(&self) -> usize {
+        self.changes.get(self.at).copied().unwrap_or_default()
     }
 
     /// The hunk being looked at, counted from zero.
@@ -71,7 +93,7 @@ impl Split {
         self.at
     }
 
-    /// How many hunks the change has. Never fewer than two.
+    /// How many hunks the change has.
     #[must_use]
     pub const fn total(&self) -> usize {
         self.ids.len()
@@ -256,6 +278,39 @@ impl Split {
                 )
             })
             .collect()
+    }
+
+    /// Where each line of hunk `i` is going, if it has been divided: the
+    /// patch lines, and the boxes parallel to them.
+    ///
+    /// Unlike [`Self::line_plan`] this reaches any hunk, not just the one
+    /// being looked at, so a plan can be captured across the whole change.
+    #[must_use]
+    pub fn division(&self, i: usize) -> Option<(&[usize], &[Option<u8>])> {
+        self.divided
+            .get(&i)
+            .map(|d| (d.at.as_slice(), d.boxes.as_slice()))
+    }
+
+    /// Restore a division worked out elsewhere, as when a plan is carried
+    /// across a split; see [`crate::plan::Plan`]. `boxes` is parallel to
+    /// `lines`, which are the hunk's `+`/`-` lines in this diff.
+    pub fn restore_division(
+        &mut self,
+        id: HunkId,
+        lines: Vec<usize>,
+        boxes: Vec<Option<u8>>,
+        planned: u8,
+    ) {
+        let Some(i) = self.ids.iter().position(|&h| h == id) else {
+            return;
+        };
+        if lines.len() != boxes.len() || boxes.iter().all(Option::is_none) {
+            return;
+        }
+        self.boxes[i] = None;
+        self.divided.insert(i, Lines { at: lines, boxes });
+        self.planned = self.planned.max(planned);
     }
 
     /// The hunks in one box, whole. A divided hunk is not one of them.
@@ -446,9 +501,9 @@ mod tests {
     /// Two files, three hunks: enough to plan more than one commit.
     fn split() -> Split {
         Split::new([
-            (HunkId { file: 0, hunk: 0 }, "a.rs".to_owned()),
-            (HunkId { file: 0, hunk: 1 }, "a.rs".to_owned()),
-            (HunkId { file: 1, hunk: 0 }, "b.rs".to_owned()),
+            (HunkId { file: 0, hunk: 0 }, "a.rs".to_owned(), 3),
+            (HunkId { file: 0, hunk: 1 }, "a.rs".to_owned(), 2),
+            (HunkId { file: 1, hunk: 0 }, "b.rs".to_owned(), 2),
         ])
         .expect("three hunks can be split")
     }
@@ -625,10 +680,25 @@ mod tests {
         assert_eq!(s.planned(), 3);
     }
 
+    /// One hunk holding one change really cannot be split: whichever way
+    /// it went, one of the two commits would be empty.
     #[test]
-    fn a_single_hunk_cannot_be_split() {
-        assert!(Split::new([(HunkId { file: 0, hunk: 0 }, "a.rs".to_owned())]).is_none());
+    fn one_hunk_with_one_change_cannot_be_split() {
+        assert!(Split::new([(HunkId { file: 0, hunk: 0 }, "a.rs".to_owned(), 1)]).is_none());
         assert!(Split::new([]).is_none());
+    }
+
+    /// But one hunk holding two changes can be, by dividing it.
+    #[test]
+    fn one_hunk_with_two_changes_can_be_divided() {
+        let mut s = Split::new([(HunkId { file: 0, hunk: 0 }, "a.rs".to_owned(), 2)])
+            .expect("two changes are two choices");
+        assert_eq!(s.total(), 1);
+        assert_eq!(s.changes(), 2);
+        s.divide(vec![4, 5]);
+        assert!(s.is_divided());
+        s.assign_line(Some(1));
+        assert!(!s.is_everything(), "one line stays behind");
     }
 
     #[test]
