@@ -24,5 +24,5 @@ pub use error::{Error, Result};
 pub use jj::{Jj, TaggedCommit, Target};
 pub use marks::Split;
 pub use message::{Draft, Field, HEADER_HARD_LIMIT, HEADER_SOFT_LIMIT, ParseError};
-pub use patch::{FileDiff, Hunk, HunkId, Patch};
+pub use patch::{FileDiff, Hunk, HunkId, Patch, Take};
 pub use plan::Plan;
