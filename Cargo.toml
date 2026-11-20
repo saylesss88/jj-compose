@@ -15,6 +15,7 @@ repository = "https://github.com/saylesss88/jj-compose"
 keywords = ["jujutsu", "commits", "changes"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = [".github", "tests/", "assets/"]
+rust-version = "1.88"
 
 [profile.release]
 opt-level = 3

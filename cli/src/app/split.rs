@@ -246,7 +246,7 @@ impl App {
             .files()
             .get(id.file)
             .and_then(|f| f.hunks.get(id.hunk))
-            .map_or_default(|hunk| patch.changed_lines(hunk))
+            .map_or_else(Vec::new, |hunk| patch.changed_lines(hunk))
     }
 
     /// Deciding one line at a time, inside a hunk that has been opened up.

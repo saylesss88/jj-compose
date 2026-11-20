@@ -64,7 +64,7 @@ fn recount(header: &str, new_count: usize) -> String {
         .strip_prefix('+')
         .and_then(|f| f.split_once(',').map_or(Some(f), |(s, _)| Some(s)))
         .unwrap_or("1");
-    let rest = parts.next().map_or_default(|r| format!(" {r}"));
+    let rest = parts.next().map_or(String::new(), |r| format!(" {r}"));
     format!("{at} {old} +{start},{new_count} {close}{rest}")
 }
 
