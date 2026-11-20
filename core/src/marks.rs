@@ -492,7 +492,7 @@ impl Split {
         self.line = line.min(self.lines().saturating_sub(1));
     }
 
-    pub fn first_line(&mut self) {
+    pub const fn first_line(&mut self) {
         self.line = 0;
     }
 

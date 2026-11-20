@@ -4,6 +4,8 @@
 //! See `message` for the message format and how existing descriptions are
 //! parsed without being rewritten.
 
+#![allow(clippy::multiple_crate_versions)]
+
 mod app;
 mod diff;
 mod vim;

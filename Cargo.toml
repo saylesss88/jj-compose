@@ -12,8 +12,6 @@ documentation = "https://docs.rs/jj-compose"
 description = "Easily split big jujutsu working copy changes into atomic commits"
 license = "Apache-2.0"
 repository = "https://github.com/saylesss88/jj-compose"
-keywords = ["jujutsu", "commits", "changes"]
-categories = ["command-line-utilities", "development-tools"]
 exclude = [".github", "tests/", "assets/"]
 rust-version = "1.88"
 

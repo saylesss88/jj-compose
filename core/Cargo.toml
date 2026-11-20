@@ -4,10 +4,12 @@ version.workspace = true
 edition.workspace = true
 description = "Core library behind jj-compose: a jj wrapper, a Conventional Commit message model, and hunk splitting"
 documentation = "https://docs.rs/jj_compose_core/latest/jj_compose_core/"
+keywords = ["jujutsu", "jj", "conventional-commits", "diff", "hunk"]
+categories = ["development-tools"]
 license.workspace = true
 authors.workspace = true
 exclude.workspace = true
-categories.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
