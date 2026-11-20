@@ -104,13 +104,14 @@ impl Mark {
             }
             return line;
         };
-        let mut style = match commit {
-            Some(n) => Style::new().fg(crate::app::ui::box_color(n)),
-            // Nothing takes this line, so it reads as struck out of the plan.
-            None => Style::new()
-                .add_modifier(Modifier::DIM)
-                .add_modifier(Modifier::CROSSED_OUT),
-        };
+        let mut style = commit.map_or_else(
+            || {
+                Style::new()
+                    .add_modifier(Modifier::DIM)
+                    .add_modifier(Modifier::CROSSED_OUT)
+            },
+            |n| Style::new().fg(crate::app::ui::box_color(n)),
+        );
         if cursor {
             style = style.add_modifier(Modifier::REVERSED);
         }

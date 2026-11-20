@@ -3,7 +3,7 @@
 mod effects;
 mod focus;
 mod split;
-pub(crate) mod ui;
+pub mod ui;
 
 use std::io;
 

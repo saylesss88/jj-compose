@@ -435,7 +435,7 @@ pub(super) fn field_editor(field: Field, text: &str) -> TextArea<'static> {
 /// red and green are spoken for by errors and the diff itself. Past the
 /// sixth box the colors repeat, which is why the digit is always drawn too
 /// --- the color is a second reading of it, never the only one.
-pub(crate) const fn box_color(n: u8) -> Color {
+pub const fn box_color(n: u8) -> Color {
     const WHEEL: [Color; 6] = [
         Color::Cyan,
         Color::Magenta,
