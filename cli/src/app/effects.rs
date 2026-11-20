@@ -86,7 +86,7 @@ impl App {
             return Ok(());
         };
         let added = split.count(commit);
-        let text = self.diff.patch().subset(&split.picked(commit));
+        let text = self.diff.patch().subset_with(&split.taken(commit));
 
         // A HunkId only means anything within one diff, so whatever is still
         // planned has to be recorded by content before the split moves it.
