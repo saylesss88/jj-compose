@@ -99,10 +99,9 @@ impl Split {
     /// stays behind. A divided hunk has one only if every line agrees.
     #[must_use]
     pub fn box_of(&self) -> Option<u8> {
-        match self.divided.get(&self.at) {
-            Some(div) => div.sole(),
-            None => self.boxes.get(self.at).copied().flatten(),
-        }
+        self.divided
+            .get(&self.at)
+            .map_or_else(|| self.boxes.get(self.at).copied().flatten(), Lines::sole)
     }
 
     /// How many boxes were ever planned, which outlives committing them.
@@ -115,9 +114,10 @@ impl Split {
     #[must_use]
     pub fn pending(&self) -> Vec<u8> {
         let mut used: Vec<u8> = (0..self.ids.len())
-            .flat_map(|i| match self.divided.get(&i) {
-                Some(div) => div.boxes.clone(),
-                None => vec![self.boxes[i]],
+            .flat_map(|i| {
+                self.divided
+                    .get(&i)
+                    .map_or_else(|| vec![self.boxes[i]], |div| div.boxes.clone())
             })
             .flatten()
             .collect();
@@ -246,12 +246,14 @@ impl Split {
         self.ids
             .iter()
             .enumerate()
-            .filter_map(|(i, &id)| match self.divided.get(&i) {
-                Some(div) => {
-                    let lines = div.in_box(commit);
-                    (!lines.is_empty()).then_some((id, Take::Lines(lines)))
-                }
-                None => (self.boxes[i] == Some(commit)).then_some((id, Take::Whole)),
+            .filter_map(|(i, &id)| {
+                self.divided.get(&i).map_or_else(
+                    || (self.boxes[i] == Some(commit)).then_some((id, Take::Whole)),
+                    |div| {
+                        let lines = div.in_box(commit);
+                        (!lines.is_empty()).then_some((id, Take::Lines(lines)))
+                    },
+                )
             })
             .collect()
     }
@@ -272,9 +274,11 @@ impl Split {
     #[must_use]
     pub fn count(&self, commit: u8) -> usize {
         (0..self.ids.len())
-            .filter(|i| match self.divided.get(i) {
-                Some(div) => !div.in_box(commit).is_empty(),
-                None => self.boxes[*i] == Some(commit),
+            .filter(|i| {
+                self.divided.get(i).map_or_else(
+                    || self.boxes[*i] == Some(commit),
+                    |div| !div.in_box(commit).is_empty(),
+                )
             })
             .count()
     }
@@ -283,9 +287,11 @@ impl Split {
     #[must_use]
     pub fn assigned(&self) -> usize {
         (0..self.ids.len())
-            .filter(|i| match self.divided.get(i) {
-                Some(div) => div.boxes.iter().any(Option::is_some),
-                None => self.boxes[*i].is_some(),
+            .filter(|i| {
+                self.divided.get(i).map_or_else(
+                    || self.boxes[*i].is_some(),
+                    |div| div.boxes.iter().any(Option::is_some),
+                )
             })
             .count()
     }
@@ -296,9 +302,11 @@ impl Split {
     #[must_use]
     pub fn is_everything(&self) -> bool {
         self.pending().len() == 1
-            && (0..self.ids.len()).all(|i| match self.divided.get(&i) {
-                Some(div) => div.boxes.iter().all(Option::is_some),
-                None => self.boxes[i].is_some(),
+            && (0..self.ids.len()).all(|i| {
+                self.divided.get(&i).map_or_else(
+                    || self.boxes[i].is_some(),
+                    |div| div.boxes.iter().all(Option::is_some),
+                )
             })
     }
 
@@ -433,6 +441,8 @@ impl Lines {
 mod tests {
     use super::*;
 
+    use crate::patch;
+
     /// Two files, three hunks: enough to plan more than one commit.
     fn split() -> Split {
         Split::new([
@@ -534,7 +544,7 @@ mod tests {
     fn a_divided_hunk_puts_nothing_in_a_box_it_has_no_line_in() {
         let mut s = divided();
         s.assign_line(Some(1));
-        assert!(s.taken(2).is_empty());
+        assert_eq!(s.taken(2), [] as [(patch::HunkId, patch::Take); 0]);
     }
 
     /// `picked` is the whole-hunk view, and a divided hunk is not whole.
@@ -542,7 +552,7 @@ mod tests {
     fn picked_leaves_divided_hunks_out() {
         let mut s = divided();
         s.assign_line(Some(1));
-        assert!(s.picked(1).is_empty());
+        assert_eq!(s.picked(1), [] as [patch::HunkId; 0]);
         assert_eq!(s.taken(1).len(), 1);
     }
 
