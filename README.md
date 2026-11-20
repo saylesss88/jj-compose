@@ -385,9 +385,9 @@ move both and every assigning key works the same in either view. `Enter`, `f` or
 
 ### Selecting a run of hunks
 
-Pressing a digit twenty times for twenty hunks is tedious, so the list has Vim's
-visual line mode. `V` (or `v`) starts a selection at the cursor, moving
-stretches it, and one digit puts every hunk in it in that commit:
+Twenty hunks shouldn't need twenty keystrokes, so the list has Vim's visual line
+mode. `V` (or `v`) starts a selection at the cursor, moving stretches it, and
+one digit assigns all of it.
 
 | Key                            | Action                                               |
 | ------------------------------ | ---------------------------------------------------- |
@@ -400,51 +400,11 @@ stretches it, and one digit puts every hunk in it in that commit:
 | `0`, `d`, `x`                  | Take the whole selection back out                    |
 | `Esc`                          | Cancel the selection; a second `Esc` closes the list |
 
-`V G 1` puts everything from the cursor down in commit 1. Unlike `a`, a
-selection is a run in diff order, so it can span files. The digit acts like it
-does on one hunk: if the whole selection is already in that commit it comes back
-out, otherwise all of it goes in. Using the selection ends it, as in Vim.
-
-There are no counts (`20j`), because the digits already name commits: `2` could
-not mean both "commit 2" and "the start of a count" without making every
-assignment wait to see what comes next. `]`, `G` and `Ctrl-d` cover the same
-ground without guessing.
-
-The enclosing definition is worked out from the file rather than read out of the
-diff, because `jj diff --git` omits it where `git diff` includes it. It uses
-git's own language-agnostic rule, the nearest line starting in the first column.
-So in prose files it reports whatever line happens to sit above, which is noise
-rather than a signal.
-
-`Enter` hands the keys back to the form, which then describes one commit at a
-time: write the message for commit 1 and press `Ctrl-s`, and jj-compose makes
-it, reopens on what is left with an empty form, and moves on to commit 2. The
-status bar says which one you are on, `Describing commit 2 of 3: 2 hunks`, and
-so does the form's key hint.
-
-Boxes survive being committed even though the hunks' positions do not: the plan
-is keyed by each hunk's text, because committing part of a change shifts every
-later hunk's line numbers. Whatever you left unassigned stays behind in the
-final change, which keeps the original description and which you describe last.
-
-While a split is pending the form's status bar says so. `^s commit 2 hunks`
-rather than `^s save`, and `Alt-←` goes back to the hunks to change the marks.
-
-This needs no configuration. jj-compose runs itself as jj's diff editor, passing
-the tool on `jj split`'s own command line, so `ui.diff-editor` is neither read
-nor needed: a `jj split --tool` setup of your own is left alone and goes on
-working from the command line as before.
-
-The description carries over to the remainder, as it does with `jj split`, so
-the form starts out holding the original message. Clear the parts that belong to
-the piece you just committed.
-
-Putting every hunk in one box leaves nothing behind, so that is a description
-rather than a split and `Ctrl-s` behaves exactly as it does outside split mode.
-
-A binary file has no hunks at all, so its change always stays with the
-remainder. The last box needs no split of its own: once everything else is
-committed, what is left _is_ that commit.
+`V G 1` puts everything from the cursor down in commit 1. Two things differ from
+`a`: a selection is a run in diff order, so it can span files, and the digit
+toggles. If the whole selection is already in that commit it comes back out.
+Using it ends the selection, as in Vim. Counts like `20j` aren't available,
+since the digits name commits; `]`, `G` and `Ctrl-d` cover the same ground.
 
 ### Dividing a hunk
 
@@ -490,7 +450,7 @@ is in no one box:
 
 **The lines start out going wherever the hunk was going**, which is the quick
 way to carve one line out of an otherwise coherent hunk: press `1` to put the
-whole hunk in commit 1, *then* `e`, and every line is already in commit 1 — now
+whole hunk in commit 1, _then_ `e`, and every line is already in commit 1 — now
 `0` on the one line that doesn't belong. Dividing decides nothing by itself, and
 a division you open and undo leaves no trace.
 
@@ -505,22 +465,45 @@ Changes come in pairs, so most decisions cover two adjacent lines. `v` (or `V`)
 starts a selection at the cursor, moving stretches it, and a digit puts the
 whole run in that commit:
 
-| Keys    | Effect                                               |
-| ------- | ---------------------------------------------------- |
-| `v j 1` | This line and the next to commit 1 — a renamed pair  |
-| `V G 2` | From here to the end of the hunk, to commit 2        |
-| `v ... 0`, `d`, `x` | Take the whole selection back out        |
-| `o`     | Jump to the other end of the selection               |
-| `Esc`   | Drop the selection; again to leave split mode        |
+| Keys                | Effect                                              |
+| ------------------- | --------------------------------------------------- |
+| `v j 1`             | This line and the next to commit 1 — a renamed pair |
+| `V G 2`             | From here to the end of the hunk, to commit 2       |
+| `v ... 0`, `d`, `x` | Take the whole selection back out                   |
+| `o`                 | Jump to the other end of the selection              |
+| `Esc`               | Drop the selection; again to leave split mode       |
 
-A digit ends the selection once it has been used, as in Vim. A selection half
-in a box is made whole rather than flipped line by line, so pressing the same
-digit twice always ends where it started.
+A digit ends the selection once it has been used, as in Vim. A selection half in
+a box is made whole rather than flipped line by line, so pressing the same digit
+twice always ends where it started.
 
 A division is not limited to two commits: the lines of one hunk can go to as
 many boxes as you like, and the plan survives each commit the same way a
 whole-hunk plan does. Once the lines still waiting all agree on one box, the
 hunk simply goes there whole and stops being divided.
+
+### Writing the messages
+
+`Enter` hands the keys back to the form, which describes one commit at a time.
+Write the message for commit 1 and press `Ctrl-s`: jj-compose makes it, reopens
+on what's left with an empty form, and moves to commit 2. The status bar tracks
+where you are, `Describing commit 2 of 3: 2 hunks`, and shows
+`^s commit 2 hunks` instead of `^s save` while a split is pending. `Alt-←` goes
+back to the hunks to change the plan.
+
+The form starts out holding the original description, which carries over to the
+remainder exactly as `jj split` does; clear the parts belonging to the commit
+you just made.
+
+A few edges:
+
+- Whatever you leave unassigned stays behind in the final change, which you
+  describe last.
+- Putting every hunk in one box leaves nothing behind, so that's a description
+  rather than a split, and `Ctrl-s` behaves as it does outside split mode.
+- A binary file has no hunks, so its change always stays with the remainder.
+- The last box needs no split of its own: once everything else is committed,
+  what's left _is_ that commit.
 
 ## Rewriting released history
 
