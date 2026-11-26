@@ -2,13 +2,13 @@
 
 <p align="center">
   <a href="https://crates.io/crates/jj-compose"><img src="https://img.shields.io/crates/v/jj-compose.svg" alt="crates.io"></a>
-  <a href="https://docs.rs/jj_release_core"><img src="https://img.shields.io/docsrs/jj_compose_core" alt="docs.rs"></a>
+  <a href="https://docs.rs/jj_compose_core"><img src="https://img.shields.io/docsrs/jj_compose_core" alt="docs.rs"></a>
   <a href="LICENSE"><img src="https://img.shields.io/crates/l/jj-compose.svg" alt="License"></a>
 </p>
 
-An interactive terminal UI for Jujutsu ([jj](https://jj-vcs.github.io/jj/)) that
-helps you split working-copy changes into atomic, structured
-[Conventional Commits](https://www.conventionalcommits.org/) while viewing the
+A terminal UI for Jujutsu ([jj](https://jj-vcs.github.io/jj/)) that splits
+working-copy changes into atomic
+[Conventional Commits](https://www.conventionalcommits.org/) while you view the
 diff.
 
 <p align="center">
@@ -18,38 +18,25 @@ diff.
 
 ## Features
 
-- **Strict Conventional Commits:** Draft structured messages with automatic
-  validation for types, scopes, header lengths (50/72 chars), and Git trailers.
-- **Line-Level Splitting:** When one hunk holds two unrelated edits, `e` divides
-  it so each line can go to a different commit. A rename in one, the logic
-  change beside it in another.
-- **Interactive Hunk Splitting:** Press `Alt-s` to review your change hunk by
-  hunk. Mark the pieces that belong together and commit them instantly—zero
-  external `ui.diff-editor` configuration required.
-- **Live, Responsive Diffing:** View the full `jj` diff alongside your commit
-  form. The layout automatically stacks on narrow terminals and flags stale
-  diffs if you edit files in another window.
-- **Rewriting released history:** `--ignore-immutable` splits even a tagged
-  release, naming the tags it strands and printing the commands to re-anchor
-  them.
-- **First-Class Vim Keymap:** Use intuitive UI defaults, or launch with
-  `--keymap vim` for full Normal/Insert mode modal editing (supports standard
-  motions, operators, and visual selections).
-- **Lossless Parsing:** Safely revises existing descriptions. If an old commit
-  message doesn't perfectly match the Conventional format, it opens in a raw
-  text editor to prevent accidental mangling.
-- **External Tool Integration:** Press `o` to instantly open the current file or
-  change in your configured external diff viewer (like Meld or Difftastic).
+- **Conventional Commits form:** validates type, scope, header length (50/72),
+  and trailers.
+- **Hunk and line splitting:** `Alt-s` walks the change hunk by hunk so you can
+  assign hunks to numbered commits. `e` divides a hunk so its lines can go to
+  different commits. No `ui.diff-editor` setup needed.
+- **Live diff:** shown beside the form, stacks on narrow terminals, and flags
+  itself stale when files change.
+- **Lossless revising:** existing messages the form can't reproduce exactly open
+  in a raw editor, untouched.
+- **Vim keymap:** `--keymap vim` for modal editing.
+- **External tools:** `o` opens the diff in Meld, Difftastic, etc.
+- **Rewriting released history:** `--ignore-immutable` can split a tagged
+  release and prints the commands to re-anchor stranded tags.
 
 ## Install
 
 ```sh
 cargo install jj-compose
-```
-
-Install the pre-compiled binary with `cargo-binstall`:
-
-```sh
+# or a prebuilt binary:
 cargo binstall jj-compose
 ```
 
@@ -59,42 +46,20 @@ Add an alias so it runs as `jj compose`:
 # ~/.config/jj/config.toml
 [aliases]
 compose = ["util", "exec", "--", "jj-compose"]
+# always use Vim keys:
+# compose = ["util", "exec", "--", "jj-compose", "--keymap", "vim"]
 ```
-
-To always use the Vim keymap, add it to the alias:
-
-```toml
-compose = ["util", "exec", "--", "jj-compose", "--keymap", "vim"]
-```
-
----
 
 ## Quick start
 
-You've been working for an hour and `@` now holds a bug fix, a refactor, and a
-docs tweak. That's one change with three commits' worth of work in it. Run:
+`@` holds a bug fix, a refactor, and a docs tweak. Run `jj compose`, then:
 
-```sh
-jj compose
-```
-
-1. **Press `Alt-s`.** The diff pane switches to split mode and shows one hunk at
-   a time.
-2. **Press `f`** to see every hunk in the change at once, with the function each
-   one sits in.
-3. **Assign hunks with digits.** Move with `j`/`k` and press `1` on each hunk
-   that belongs to the fix and `2` on each one that belongs to the refactor.
-   Leave the docs hunks unassigned so they stay in the remainder. Lower numbers
-   are committed first, so `1` becomes the earliest commit. Nothing is final
-   yet: press a digit again or `0` to take a hunk back out.
-4. **Press `Enter`** to go to the form. The status bar shows
-   `Describing commit 1 of 3`.
-5. **Write the message and press `Ctrl-s`.** jj-compose commits those hunks,
-   reopens on what's left, and moves on to commit 2. Do the same for that one.
-6. **Describe the remainder last.** The docs tweak is all that's left, and its
-   message goes on `@`.
-
-The result:
+1. Press `Alt-s` to enter split mode, then `f` to list every hunk.
+2. Move with `j`/`k`. Press `1` on the fix hunks and `2` on the refactor hunks.
+   Leave the docs hunks unassigned. `0` (or the same digit again) unassigns.
+3. Press `Enter`, write the message for commit 1, and press `Ctrl-s`. Repeat for
+   commit 2.
+4. Describe what's left (the docs tweak) last. That message goes on `@`.
 
 ```text
 @  docs: clarify empty-input behavior
@@ -102,12 +67,8 @@ The result:
 ○  fix(parser): return no tokens for empty input
 ```
 
-You get three atomic commits, ordered so each one builds, and you never left the
-terminal or touched `ui.diff-editor`.
-
-If you change your mind partway through, press `Alt-←` to go back to the hunks
-and change the marks. To make a single commit with no split, skip `Alt-s`, fill
-in the form, and press `Ctrl-s`.
+Lower numbers commit first, so order them so each commit builds. `Alt-←` goes
+back to the hunks. For a single commit, skip `Alt-s` and just fill in the form.
 
 ## Usage
 
@@ -126,14 +87,9 @@ jj-compose <revset>     # any single mutable revision
 | `--diff-tool <NAME>`      | Tool `o`/`O` open the diff in. Also `JJ_COMPOSE_DIFF_TOOL`.  |
 | `--ignore-immutable`      | Allow rewriting protected history. See below.                |
 
-The revset must resolve to exactly one mutable revision; immutable ones are
-rejected before the TUI opens. It's resolved once, at launch, so `@-` or a
-bookmark can't drift to a different change while you're writing.
-
-Saving runs `jj describe` on that change by its change ID, so it still finds the
-right change if you edit files while jj-compose is open (jj rewrites the commit
-when it snapshots your edits). Saving a message identical to the current one
-does nothing.
+The revset must resolve to one mutable revision and is resolved once at launch.
+Saving runs `jj describe` by change ID, so editing files while jj-compose is
+open is safe. Saving an unchanged message does nothing.
 
 ## The message
 
@@ -153,51 +109,20 @@ Reviewed-by: Name <email>
 ```
 
 Only the header is required. A `!` at the end of the Type field marks a breaking
-change and is written after the scope. Trailers are the final paragraph of
-`Token: value` or `Token #value` lines (`BREAKING CHANGE:` included); they are
-checked when you save.
+change. Trailers (a final paragraph of `Token: value` or `Token #value` lines,
+including `BREAKING CHANGE:`) are checked on save. The Subject title shows the
+header length: green up to 50, yellow up to 72, red beyond.
 
-The Subject title shows the header's length: green up to 50 characters, yellow
-up to 72, red beyond.
-
-### Revising existing descriptions
-
-On launch the revision's current description is loaded. It opens in the form
-**only if the form can reproduce it byte for byte**; otherwise it opens in the
-raw editor, unchanged, and the status bar says why (for example, the first line
-isn't `type(scope): subject`). Opening and saving a message never reshapes it
-behind your back.
-
-`Ctrl-t` switches between the form and the raw text at any time. Switching to
-the form from raw text follows the same rule, so it's refused (with the reason)
-until the text fits. Saving from the raw view writes the text exactly as typed,
-without Conventional Commit validation.
+An existing description opens in the form only if the form can reproduce it byte
+for byte. Otherwise it opens in the raw editor and the status bar says why.
+`Ctrl-t` toggles between form and raw. Raw text is saved exactly as typed,
+without validation.
 
 ## The diff pane
 
-The diff is shown in git format with jj's colors, so your jj color settings
-apply, but `ui.diff-formatter` does not. Each file starts with a title row
-giving its path and how many lines were added and removed. The pane's title
-shows which file is at the top, how many there are, and the current search.
-
-- **Files and hunks:** `]` / `[` jump to the next / previous file, `}` / `{` to
-  the next / previous hunk. `f` shows a list of every file with its counts down
-  the side of the pane.
-- **Search:** `/` opens a prompt in the status bar; `Enter` jumps to the first
-  match, `n` / `N` move between matches. Searches ignore case unless they
-  contain a capital letter.
-- **Zoom:** `z` gives the diff the whole window, until you move back to the
-  form.
-- **Splitting:** `s` (or `Alt-s` from the form) reads the change one hunk at a
-  time and marks the ones to commit together, so each piece gets its own
-  message. See [Splitting a change](#splitting-a-change).
-- **Stale diff:** when you're describing `@`, editing a file that's in the diff
-  (in another terminal or your editor) flags the pane `stale: r to reload`
-  within a second. `r` reloads it and keeps your place and search. New files
-  that weren't in the diff show up on the next reload.
-
-On terminals narrower than 100 columns the diff sits above the form instead of
-beside it, and moving between the two follows the layout on screen.
+The diff uses git format with jj's colors (`ui.diff-formatter` is ignored).
+Below 100 columns it sits above the form instead of beside it. When describing
+`@`, editing a file in the diff marks the pane `stale: r to reload`.
 
 ## Keys
 
@@ -214,69 +139,43 @@ beside it, and moving between the two follows the layout on screen.
 | `PgDn` / `PgUp`     | Scroll the diff half a page           |
 | `Alt-↓` / `Alt-↑`   | Scroll the diff one line              |
 
-### Moving between boxes
-
-The form is laid out with Type and Scope side by side above Subject, and the
-other fields below. Moving past the edge of a field's text goes to whatever is
-next to it on screen:
-
-```text
- diff  │  Type  ⇄  Scope          diff (narrow terminals)
-       │      Subject              ──────────────────────
-       │      Body                   Type  ⇄  Scope
-       │      ...                        Subject
-       │      Trailers                   ...
-```
-
-- From Type or Scope, down goes to Subject; up from Subject returns to whichever
-  of the two you left last.
-- The diff is reached by going left from the start of a field, or up from Type
-  or Scope on narrow terminals.
-- Entering a field from the side puts the cursor on the side you came from.
-
-Tab and `Enter` always follow the plain top-to-bottom order.
+Type and Scope sit side by side above Subject. Moving past the edge of a field's
+text goes to the field next to it on screen. In the Vim keymap that includes the
+diff (left of the form, or above it on narrow terminals); default-keymap arrows
+never leave the form. Tab and `Enter` follow top-to-bottom order.
 
 ### Default keymap
 
-The form opens ready to type in Type.
-
-| Key                                    | Action                                                        |
-| -------------------------------------- | ------------------------------------------------------------- |
-| `Enter`                                | Next field (one-line fields) or newline                       |
-| Arrows at a field's edge               | The field in that direction (←/→ only between Type and Scope) |
-| `Esc`                                  | Quit (asks again if there are edits)                          |
-| `Shift`+arrows                         | Select                                                        |
-| `Ctrl-x` / `Alt-w` / `Ctrl-y`          | Cut / copy / paste (internal clipboard)                       |
-| `Ctrl-z` or `Ctrl-u` / `Ctrl-r`        | Undo / redo                                                   |
-| `Ctrl-←` / `Ctrl-→`, `Alt-b` / `Alt-f` | Word left / right                                             |
-| `Ctrl-w`, `Alt-Backspace` / `Alt-d`    | Delete word before / after                                    |
-| `Home` / `End`, `Ctrl-a` / `Ctrl-e`    | Line start / end                                              |
-| `Ctrl-k` / `Ctrl-j`                    | Delete to end / start of line                                 |
-
-The arrow keys never move you into the diff, so holding one down can't leave the
-form; use `Alt-←` or Tab for that.
-
-Pasting from the terminal inserts text as-is; in one-line fields newlines become
-spaces.
+| Key                                    | Action                                  |
+| -------------------------------------- | --------------------------------------- |
+| `Enter`                                | Next field (one-line fields) or newline |
+| Arrows at a field's edge               | The adjacent field                      |
+| `Esc`                                  | Quit (asks again if there are edits)    |
+| `Shift`+arrows                         | Select                                  |
+| `Ctrl-x` / `Alt-w` / `Ctrl-y`          | Cut / copy / paste (internal clipboard) |
+| `Ctrl-z` or `Ctrl-u` / `Ctrl-r`        | Undo / redo                             |
+| `Ctrl-←` / `Ctrl-→`, `Alt-b` / `Alt-f` | Word left / right                       |
+| `Ctrl-w`, `Alt-Backspace` / `Alt-d`    | Delete word before / after              |
+| `Home` / `End`, `Ctrl-a` / `Ctrl-e`    | Line start / end                        |
+| `Ctrl-k` / `Ctrl-j`                    | Delete to end / start of line           |
 
 ### Vim keymap
 
-`--keymap vim` or `JJ_COMPOSE_KEYMAP=vim`. Starts in Insert mode for a new
-description and Normal mode when revising one; the status bar shows the mode.
-Insert mode uses the default keymap's editing keys.
+Starts in Insert mode for a new description, Normal mode when revising one.
+Insert mode uses the default editing keys.
 
-| Key                                                 | Action                                |
-| --------------------------------------------------- | ------------------------------------- |
-| `h` `j` `k` `l`, `w` `b` `e`, `0` `^` `$`, `gg` `G` | Motions                               |
-| `h` `j` `k` `l` past the edge of a field's text     | The box in that direction (see above) |
-| `Enter`                                             | Next field                            |
-| `i` `a` `I` `A` `o` `O`                             | Insert                                |
-| `x` `D` `C` `S` `J`                                 | Edit                                  |
-| `d` `c` `y` + motion, `dd` `cc` `yy`, `p` `P`       | Operators and paste                   |
-| `v` / `V`                                           | Visual / visual line                  |
-| `u` / `Ctrl-r`                                      | Undo / redo                           |
-| `Ctrl-d` / `Ctrl-u`, `Ctrl-e` / `Ctrl-y`            | Scroll the diff                       |
-| `q`                                                 | Quit (asks again if there are edits)  |
+| Key                                                 | Action                               |
+| --------------------------------------------------- | ------------------------------------ |
+| `h` `j` `k` `l`, `w` `b` `e`, `0` `^` `$`, `gg` `G` | Motions                              |
+| `h` `j` `k` `l` past the edge of a field's text     | The box in that direction            |
+| `Enter`                                             | Next field                           |
+| `i` `a` `I` `A` `o` `O`                             | Insert                               |
+| `x` `D` `C` `S` `J`                                 | Edit                                 |
+| `d` `c` `y` + motion, `dd` `cc` `yy`, `p` `P`       | Operators and paste                  |
+| `v` / `V`                                           | Visual / visual line                 |
+| `u` / `Ctrl-r`                                      | Undo / redo                          |
+| `Ctrl-d` / `Ctrl-u`, `Ctrl-e` / `Ctrl-y`            | Scroll the diff                      |
+| `q`                                                 | Quit (asks again if there are edits) |
 
 ### Diff pane
 
@@ -288,7 +187,7 @@ Insert mode uses the default keymap's editing keys.
 | `]` / `[`                    | Next / previous file                                         |
 | `}` / `{`                    | Next / previous hunk                                         |
 | `f`                          | Show / hide the file list                                    |
-| `/`, then `n` / `N`          | Search, next / previous match                                |
+| `/`, then `n` / `N`          | Search (smart case), next / previous match                   |
 | `z`                          | Zoom the diff to the whole window                            |
 | `r`                          | Reload the diff                                              |
 | `H` / `L`, `←` / `→`         | Pan sideways                                                 |
@@ -297,68 +196,43 @@ Insert mode uses the default keymap's editing keys.
 | `o` / `O`                    | Open the current file / the whole change in an external tool |
 | `q` (Vim keymap)             | Quit (asks again if there are edits)                         |
 
----
-
 ## Splitting a change
 
-A change that does three things needs three messages. `Alt-s` (or `s` in the
-diff pane) fills the pane with one hunk at a time so each can be read on its
-own, and you mark the ones that belong together.
-
-Moving decides nothing, and nothing is final until you commit. Hunks go into
-numbered boxes, one per commit you mean to make, and you can move a hunk between
-them or take it out again right up to the split:
+`Alt-s` (or `s` in the diff pane) shows one hunk at a time. Put hunks into
+numbered commits; nothing is final until you commit. Lower numbers commit first.
 
 | Key                             | Action                                                     |
 | ------------------------------- | ---------------------------------------------------------- |
-| `1`–`9`                         | Put this hunk in that commit                               |
+| `1` to `9`                      | Put this hunk in that commit                               |
 | the same digit again, or `0`    | Take it back out                                           |
 | `n` / `p`, `}` / `{`, `→` / `←` | Next / previous hunk                                       |
 | `g` / `G`                       | First / last hunk                                          |
 | `a` / `d`                       | Put the rest of this file in the same commit / take it out |
-| `e`                             | Divide this hunk, to send its lines to different commits   |
+| `e`                             | Divide this hunk line by line                              |
 | `f`                             | Show the whole change as a list                            |
-| `V` / `v`                       | Open the list, selecting from this hunk (see below)        |
+| `V` / `v`                       | Open the list with a selection started                     |
 | `Enter`                         | Done planning; go write the messages                       |
 | `Esc`, `q`                      | Leave split mode, discarding the plan                      |
 | `j` / `k`, `Ctrl-d` / `Ctrl-u`  | Scroll inside a hunk taller than the pane                  |
 
-**The numbering is the order.** Boxes are committed lowest first, so putting a
-hunk in commit 1 makes it the earliest commit regardless of where it sits in the
-diff. That is how you order a decomposition so each commit builds.
-
-The title carries the whole plan while only one hunk is on screen:
+The title shows the whole plan: a colored digit per assigned hunk, `·` for
+unassigned, and brackets round the current one.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/saylesss88/jj-compose/main/assets/jj-compose-title.png"
        alt="jj-compose-title" width="600">
 </p>
 
-A digit per hunk + different colors per commit, `·` for one staying behind, and
-brackets round the hunk you are looking at.
-
-`f` swaps the single hunk for the whole change at once, which is usually how you
-work out what belongs together:
+`f` lists every hunk with its commit, line number, size, and enclosing
+definition. Each file heading shows how many of its hunks are assigned, so
+leftovers are easy to spot. The list and the single-hunk view share one cursor.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/saylesss88/jj-compose/main/assets/jj-compose-hunks.png"
        alt="jj-compose-hunk" width="500">
 </p>
 
-Each file heading carries its totals and how many of its hunks are spoken for —
-`1 of 3 assigned` is what tells you a file you thought you had finished still
-has something left in it. Each hunk row gives its commit, its line number, its
-size, and the definition it sits in.
-
-The cursor in the list and the hunk on screen are the same cursor, so `j`/`k`
-move both and every assigning key works the same in either view. `Enter`, `f` or
-`Esc` goes back to reading whichever hunk the cursor was left on.
-
 ### Selecting a run of hunks
-
-Twenty hunks shouldn't need twenty keystrokes, so the list has Vim's visual line
-mode. `V` (or `v`) starts a selection at the cursor, moving stretches it, and
-one digit assigns all of it.
 
 | Key                            | Action                                               |
 | ------------------------------ | ---------------------------------------------------- |
@@ -367,38 +241,27 @@ one digit assigns all of it.
 | `]` / `[`                      | Stretch it to the next file / back to a file's start |
 | `g` / `G`                      | Stretch it to the first / last hunk                  |
 | `o`                            | Jump to the other end of the selection               |
-| `1`–`9`                        | Put the whole selection in that commit               |
+| `1` to `9`                     | Put the whole selection in that commit (toggles)     |
 | `0`, `d`, `x`                  | Take the whole selection back out                    |
 | `Esc`                          | Cancel the selection; a second `Esc` closes the list |
 
-`V G 1` puts everything from the cursor down in commit 1. Two things differ from
-`a`: a selection is a run in diff order, so it can span files, and the digit
-toggles. If the whole selection is already in that commit it comes back out.
-Using it ends the selection, as in Vim. Counts like `20j` aren't available,
-since the digits name commits; `]`, `G` and `Ctrl-d` cover the same ground.
+`V G 1` puts everything from the cursor down in commit 1. Selections can span
+files. Counts like `20j` aren't supported, since digits name commits.
 
 ### Dividing a hunk
 
-Two unrelated edits on neighbouring lines land in the same hunk, and then no
-amount of moving hunks around will separate them. `e` opens the hunk being
-looked at so each of its `+`/`-` lines can go somewhere of its own; `e` again
-closes it.
+When two unrelated edits share a hunk, `e` lets each `+`/`-` line go to its own
+commit. `e` again closes it.
 
 | Key                          | Action                                  |
 | ---------------------------- | --------------------------------------- |
-| `1`–`9`                      | Put this line in that commit            |
+| `1` to `9`                   | Put this line in that commit            |
 | the same digit again, or `0` | Take it back out                        |
 | `j` / `k`, `n` / `p`         | Next / previous line                    |
 | `g` / `G`                    | First / last line                       |
-| `v` / `V`                    | Select a run of lines (see below)       |
+| `v` / `V`, then `o`          | Select a run of lines / jump to its end |
 | `e`                          | Close it; lines that agree fold back up |
 | `Ctrl-d` / `Ctrl-u`          | Move the cursor half a page             |
-
-The lines are shown in the order they will be written, which is not quite the
-order `jj diff` prints them in: git groups the removals and then the additions,
-and a divided hunk pairs each removal with the addition replacing it. A line no
-commit takes is struck through, so what is left behind is as visible as what is
-taken.
 
 ```text
 ┌ Divide wvkqrwwn · hunk 2/4 · src/app.rs · 11·· · 2/4 taken ─┐
@@ -411,97 +274,43 @@ taken.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-In the `f` list a divided hunk is marked `*` with a count of its lines, since it
-is in no one box:
-
-```text
-│ src/app.rs  +2 -2  1 of 2 assigned              │
-│ *   1    +1   -1  impl App  2 of 4 lines        │
-```
-
-**The lines start out going wherever the hunk was going**, which is the quick
-way to carve one line out of an otherwise coherent hunk: press `1` to put the
-whole hunk in commit 1, _then_ `e`, and every line is already in commit 1 — now
-`0` on the one line that doesn't belong. Dividing decides nothing by itself, and
-a division you open and undo leaves no trace.
-
-Lines are the smallest unit: there is no taking half a line. A `-` and the `+`
-replacing it are two separate choices, so taking the `+` without the `-` leaves
-both lines in the file — the untaken one isn't struck through, which is how you
-see it.
-
-#### Selecting a run of lines
-
-Changes come in pairs, so most decisions cover two adjacent lines. `v` (or `V`)
-starts a selection at the cursor, moving stretches it, and a digit puts the
-whole run in that commit:
-
-| Keys                | Effect                                              |
-| ------------------- | --------------------------------------------------- |
-| `v j 1`             | This line and the next to commit 1 — a renamed pair |
-| `V G 2`             | From here to the end of the hunk, to commit 2       |
-| `v ... 0`, `d`, `x` | Take the whole selection back out                   |
-| `o`                 | Jump to the other end of the selection              |
-| `Esc`               | Drop the selection; again to leave split mode       |
-
-A digit ends the selection once it has been used, as in Vim. A selection half in
-a box is made whole rather than flipped line by line, so pressing the same digit
-twice always ends where it started.
-
-A division is not limited to two commits: the lines of one hunk can go to as
-many boxes as you like, and the plan survives each commit the same way a
-whole-hunk plan does. Once the lines still waiting all agree on one box, the
-hunk simply goes there whole and stops being divided.
+- Each removal is shown next to the addition replacing it. Lines no commit takes
+  are struck through.
+- Lines start in the hunk's commit, so to carve out one line: `1`, `e`, then `0`
+  on that line.
+- A `-` and its `+` are separate choices; taking only one leaves both in the
+  file.
+- `v j 1` sends a renamed pair to commit 1. A digit on a half-assigned selection
+  assigns all of it.
+- Once all remaining lines agree on one commit, the hunk goes there whole.
 
 ### Writing the messages
 
-`Enter` hands the keys back to the form, which describes one commit at a time.
-Write the message for commit 1 and press `Ctrl-s`: jj-compose makes it, reopens
-on what's left with an empty form, and moves to commit 2. The status bar tracks
-where you are, `Describing commit 2 of 3: 2 hunks`, and shows
-`^s commit 2 hunks` instead of `^s save` while a split is pending. `Alt-←` goes
-back to the hunks to change the plan.
+`Enter` moves to the form. Each `Ctrl-s` commits the current box and moves to
+the next; the status bar shows `Describing commit 2 of 3: 2 hunks`. The form
+starts with the original description, which carries over to the remainder as
+with `jj split`, so delete the parts that don't belong.
 
-The form starts out holding the original description, which carries over to the
-remainder exactly as `jj split` does; clear the parts belonging to the commit
-you just made.
-
-A few edges:
-
-- Whatever you leave unassigned stays behind in the final change, which you
-  describe last.
-- Putting every hunk in one box leaves nothing behind, so that's a description
-  rather than a split, and `Ctrl-s` behaves as it does outside split mode.
-- A binary file has no hunks, so its change always stays with the remainder.
-- The last box needs no split of its own: once everything else is committed,
-  what's left _is_ that commit.
+- Unassigned hunks stay in the final change, described last.
+- Putting every hunk in one box is just a describe.
+- Binary files have no hunks and always stay with the remainder.
 
 ## Rewriting released history
 
 <!--prettier-ignore-->
 > [!WARNING]
-> **Do not rewrite commits that others rely on.** Since jj marks pushed commits
-> as immutable, this flag exists to let you rewrite them. Only do this if you
-> are absolutely certain no one else has pulled these commits, and be prepared
-> to forcefully push the rewritten tags.
+> **Don't rewrite commits others rely on.** Only use this if nobody has pulled
+> them, and be ready to force-push the rewritten tags.
 
-By default a revision jj protects as immutable: a tagged release, anything on
-trunk, is refused before the TUI opens. `--ignore-immutable` passes jj's own
-flag of that name through to every command, so such a revision can be split like
-any other.
+`--ignore-immutable` passes jj's flag through, so protected revisions (tagged
+releases, trunk) can be split. jj-compose can't undo either consequence:
 
-Two things happen when you do, and jj-compose can reverse **neither**:
+- Tags on that revision or its descendants are stranded. jj-compose suggests
+  moving them to the remainder, which holds all the original content.
+- Every descendant gets a new hash.
 
-- **Every tag on that revision or after it is stranded**, left pointing at a
-  commit that is now hidden. Splitting is worse than describing here: one commit
-  becomes two, so there is no mechanical answer to where the tag belongs.
-  jj-compose suggests the remainder, since that is the commit holding the whole
-  of the original content. Tags on _ancestors_ are untouched.
-- **Every later commit gets a new hash**, because jj rebases the descendants.
-
-So the mode is loud about it. The pane title carries `· immutable` for the whole
-session, the status bar names the tags at risk before any work is done, and on
-exit jj-compose prints what to run:
+The pane title shows `· immutable`, the status bar names the tags at risk, and
+on exit jj-compose prints the fix:
 
 ```text
 Rewriting immutable history left these tags behind:
@@ -510,25 +319,17 @@ Rewriting immutable history left these tags behind:
   git push origin v0.1.0 --force
 ```
 
-The `git push` is there because `jj git push` cannot force-push a tag; that one
-step has to go through git.
-
-Think twice before using this on anything already published. If a release is on
-crates.io, rewriting its commit makes your history disagree with the tarball,
-and you then maintain that disagreement through force-pushed tags and a
-regenerated changelog. The honest use is a release made minutes ago that nobody
-has pulled, and for that, `jj op restore` is usually cleaner still, since it
-rolls the tag back too instead of leaving you to re-anchor it.
+`jj git push` can't force-push a tag, hence `git push`. If the release is
+already on crates.io, your history will disagree with the tarball. For a release
+nobody has pulled yet, `jj op restore` is usually cleaner since it rolls back
+the tag too.
 
 ## External diff tools
 
-`o` opens the file at the top of the pane in another program; `O` opens the
-whole change. Both run `jj diff --tool`, so the tool is whatever `--diff-tool`
-says, and otherwise jj's own `ui.diff-editor`: a working `jj split` setup needs
-no extra configuration here. The status bar names the tool that `o` will use.
-
-`jj diff --tool` takes its arguments from `diff-args`, while `jj split` uses
-`edit-args`, so a tool configured only for splitting needs the one line:
+`o` opens the current file and `O` the whole change, via `jj diff --tool`. The
+tool comes from `--diff-tool` / `JJ_COMPOSE_DIFF_TOOL`, otherwise
+`ui.diff-editor`. `jj diff --tool` reads `diff-args`, not `edit-args`, so add
+it:
 
 ```toml
 # ~/.config/jj/config.toml
@@ -541,15 +342,9 @@ edit-args = ["--newtab", "$left", "$right"]
 diff-args = ["--newtab", "$left", "$right"]   # for `o`/`O`
 ```
 
-A GUI tool returns to the form as soon as you close its window. A terminal tool
-such as `difft` is paged by jj, so quit the pager (`q`) to come back. With no
-tool configured at all, `o` says so rather than opening jj's internal diff,
-which is the one already on screen.
-
-`ui.diff-editor` is sometimes set to something that only makes sense for
-splitting, such as a script wrapping `git add -p`. That isn't a viewer, so `o`
-would pick it up and do nothing useful. Set `--diff-tool` or
-`JJ_COMPOSE_DIFF_TOOL` to a real diff viewer in that case.
+Terminal tools like `difft` are paged by jj; press `q` to return. If
+`ui.diff-editor` is a split-only script (e.g. wrapping `git add -p`), point
+`--diff-tool` at a real viewer.
 
 ## License
 
