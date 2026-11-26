@@ -41,32 +41,6 @@ diff.
 - **External Tool Integration:** Press `o` to instantly open the current file or
   change in your configured external diff viewer (like Meld or Difftastic).
 
-```text
-┌ Diff xuurlzoz · 1/2 README.md +2 -0 ───────────┐┌ Type ────────────┐┌ Scope ─────────────────────┐
-│README.md  +2 -0                                ││fix               ││parser                      │
-│@@ -1,1 +1,3 @@                                 │└──────────────────┘└────────────────────────────┘
-│ # demo                                         │┌ Subject 31/72 ─────────────────────────────────┐
-│+                                               ││handle empty input                              │
-│+Empty input now parses to no tokens.           │└────────────────────────────────────────────────┘
-│                                                │┌ Body ──────────────────────────────────────────┐
-│src/parser.rs  +1 -1                            ││This also corrects an unrelated diagnostic.     │
-│@@ -1,7 +1,7 @@                                 ││                                                │
-│ pub fn parse(input: &str) -> Vec<Token> {      ││                                                │
-│     let len = input.len();                     │└────────────────────────────────────────────────┘
-│     if len == 0 {                              │┌ Problem ───────────────────────────────────────┐
-│-        panic!("empty input");                 ││ What is wrong or missing? (optional)           │
-│+        return Vec::new();                     ││                                                │
-│     }                                          │└────────────────────────────────────────────────┘
-│     lex(input)                                 │┌ Solution ──────────────────────────────────────┐
-│ }                                              ││ How does this change address it? (optional)    │
-│                                                ││                                                │
-│                                                │└────────────────────────────────────────────────┘
-│                                                │┌ Trailers ──────────────────────────────────────┐
-│                                                ││Fixes #42                                       │
-└────────────────────────────────────────────────┘└────────────────────────────────────────────────┘
- Tab next · Enter next/newline · Alt-← diff · Alt-s split · ^t raw/form · ^s save · Esc quit
-```
-
 ## Install
 
 ```sh
@@ -355,15 +329,21 @@ diff. That is how you order a decomposition so each commit builds.
 
 The title carries the whole plan while only one hunk is on screen:
 
-```text
- Split xuurlzoz · hunk 2/5 · src/app.rs · 1[2]·2· · commit 2 · 4/5 planned
-```
+<p align="center">
+  <img src="https://raw.githubusercontent.com/saylesss88/jj-compose/main/assets/jj-compose-title.png"
+       alt="jj-compose-title" width="200">
+</p>
 
-A digit per hunk, `·` for one staying behind, and brackets round the hunk you
+A digit per hunk + different colors per commit, `·` for one staying behind, and brackets round the hunk you
 are looking at.
 
 `f` swaps the single hunk for the whole change at once, which is usually how you
 work out what belongs together:
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/saylesss88/jj-compose/main/assets/jj-compose-hunk.png"
+       alt="jj-compose-hunk" width="200">
+</p>
 
 ```text
 ┌ Hunks in wvkqrwwn · 3 of 6 assigned · 2 commits ┐
