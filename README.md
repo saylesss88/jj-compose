@@ -331,7 +331,7 @@ The title carries the whole plan while only one hunk is on screen:
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/saylesss88/jj-compose/main/assets/jj-compose-title.png"
-       alt="jj-compose-title" width="200">
+       alt="jj-compose-title" width="600">
 </p>
 
 A digit per hunk + different colors per commit, `·` for one staying behind, and brackets round the hunk you
@@ -342,7 +342,7 @@ work out what belongs together:
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/saylesss88/jj-compose/main/assets/jj-compose-hunk.png"
-       alt="jj-compose-hunk" width="200">
+       alt="jj-compose-hunk" width="500">
 </p>
 
 ```text
