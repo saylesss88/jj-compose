@@ -5,7 +5,7 @@ resolver = "3"
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["T. Sawyer <saylesss87@proton.me>"]
 documentation = "https://docs.rs/jj-compose"
