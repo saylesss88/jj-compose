@@ -341,7 +341,7 @@ are looking at.
 work out what belongs together:
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/saylesss88/jj-compose/main/assets/jj-compose-hunk.png"
+  <img src="https://raw.githubusercontent.com/saylesss88/jj-compose/main/assets/jj-compose-hunks.png"
        alt="jj-compose-hunk" width="500">
 </p>
 
