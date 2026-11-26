@@ -16,9 +16,9 @@ cargo = true
 enabled = true
 strict = true
 file = "CHANGELOG.md"
-# emoji_headers = true
-# link_headers = true
-layout = "both" # "root" (default) or "both"
+emoji_headers = true
+link_headers = true
+layout = "both"       # "root" (default) or "both"
 # exclude_prefixes = ["chore", "ci", "test"]
 
 # [changelog.prefix_mapping]
