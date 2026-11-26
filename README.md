@@ -11,6 +11,11 @@ helps you split working-copy changes into atomic, structured
 [Conventional Commits](https://www.conventionalcommits.org/) while viewing the
 diff.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/saylesss88/jj-release/main/assets/jj-compose.png"
+       alt="jj-compose: compose atomic commits" width="400">
+</p>
+
 ## Features
 
 - **Strict Conventional Commits:** Draft structured messages with automatic
