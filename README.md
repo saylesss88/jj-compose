@@ -334,8 +334,8 @@ The title carries the whole plan while only one hunk is on screen:
        alt="jj-compose-title" width="600">
 </p>
 
-A digit per hunk + different colors per commit, `·` for one staying behind, and brackets round the hunk you
-are looking at.
+A digit per hunk + different colors per commit, `·` for one staying behind, and
+brackets round the hunk you are looking at.
 
 `f` swaps the single hunk for the whole change at once, which is usually how you
 work out what belongs together:
@@ -344,20 +344,6 @@ work out what belongs together:
   <img src="https://raw.githubusercontent.com/saylesss88/jj-compose/main/assets/jj-compose-hunks.png"
        alt="jj-compose-hunk" width="500">
 </p>
-
-```text
-┌ Hunks in wvkqrwwn · 3 of 6 assigned · 2 commits ┐
-│ README.md  +1 -1  0 of 1 assigned               │
-│     8    +1   -1  line CHANGED                  │
-│ cli/src/app.rs  +2 -2  1 of 2 assigned          │
-│ 2   1    +1   -1  impl App                      │
-│    18    +1   -1  fn plural()                   │
-│ core/src/jj.rs  +3 -3  2 of 3 assigned          │
-│ 1   1    +1   -1  fn resolve()                  │
-│ 1  14    +1   -1  fn describe()                 │
-│    28    +1   -1  fn split_change()             │
-└─────────────────────────────────────────────────┘
-```
 
 Each file heading carries its totals and how many of its hunks are spoken for —
 `1 of 3 assigned` is what tells you a file you thought you had finished still
