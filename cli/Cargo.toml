@@ -17,13 +17,15 @@ rust-version.workspace = true
 jj_compose_core = { path = "../core", version = "0.2.0" }
 anyhow = { version = "1.0", default-features = false }
 clap = { version = "4", features = ["derive", "env"] }
-ratatui = { version = "0.30", features = ["crossterm"], default-features = false }
+ratatui = { version = "0.30", features = [
+  "crossterm",
+], default-features = false }
 ratatui-textarea = "0.9"
 ansi-to-tui = { version = "8.0", default-features = false }
 
 [package.metadata.binstall]
-pkg-url = "https://github.com/saylesss88/jj-compose/releases/download/v{ version }/jj-compose{ target }.tar.gz"
-bin-dir = "jj-compose{ target }/jj-compose{ binary-ext }"
+pkg-url = "https://github.com/saylesss88/jj-compose/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+bin-dir = "{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
 [lints]
