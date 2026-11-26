@@ -13,7 +13,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-thiserror = "2.0"
+thiserror = { version = "2.0", default-features = false }
 
 [lints]
 workspace = true
